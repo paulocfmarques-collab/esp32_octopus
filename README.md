@@ -2,7 +2,7 @@
 
 <div align="center">
 
-**A configurable ESP32 network controller with Wi-Fi provisioning, UDP commands, SD-card logging, diagnostics, and status LEDs.**
+**A configurable ESP32 network controller with Wi-Fi provisioning, UDP commands, SD-card logging, diagnostics, status LEDs, and OTA updates.**
 
 [![Platform](https://img.shields.io/badge/platform-ESP32-E7352C?logo=espressif&logoColor=white)](https://www.espressif.com/en/products/socs/esp32)
 [![Language](https://img.shields.io/badge/language-C%2B%2B-00599C?logo=cplusplus&logoColor=white)](https://isocpp.org/)
@@ -12,7 +12,7 @@
 
 </div>
 
-> **Project status:** functional embedded prototype. The firmware is currently implemented in a single Arduino sketch, `card_wifi.ino`.
+> **Project status:** functional embedded prototype in active modularization. The repository now includes multiple source files for Wi-Fi, storage, telemetry, LED control, NTP, and OTA management, with `Octopus.ino` as the main firmware entry point.
 
 ---
 
@@ -28,6 +28,7 @@
 - [Testing the device](#testing-the-device)
 - [Storage and logs](#storage-and-logs)
 - [LED and button behavior](#led-and-button-behavior)
+- [Source files](#source-files)
 - [Project structure](#project-structure)
 - [Known limitations and next steps](#known-limitations-and-next-steps)
 - [License](#license)
@@ -41,9 +42,10 @@
 - receive control and diagnostic commands over UDP on port `4210`;
 - control the blue status LED remotely;
 - read device, memory, flash, network, temperature, MAC, reset, and uptime information;
-- persist operational logs and exchange text files through a microSD card.
+- persist operational logs and exchange text files through a microSD card;
+- synchronize time using NTP and support wireless firmware updates over OTA.
 
-The Wi-Fi credentials are stored in the ESP32 non-volatile storage using the `Preferences` library. If the saved network cannot be used, the device starts an access point named `ESP32_CONFIG` and serves a small Portuguese-language configuration page.
+The Wi-Fi credentials are stored in the ESP32 non-volatile storage using the `Preferences` library. If the saved network cannot be used, the device starts an access point named `ESP32_CONFIG` and serves a small configuration page. In the current repository layout, the firmware is split across several source files instead of a single monolithic sketch, which makes the logic easier to maintain and extend.
 
 ## Features
 
@@ -56,6 +58,8 @@ The Wi-Fi credentials are stored in the ESP32 non-volatile storage using the `Pr
 | Storage | Custom SPI microSD initialization and append-only `/log.txt` |
 | Feedback | Green heartbeat LED, blue connection/command LED, and reset button |
 | Recovery | `RESET_WIFI` command or physical reset button clears credentials and restarts provisioning |
+| Time sync | NTP initialization and local time handling |
+| Updates | OTA upload support with background task handling |
 
 ## System architecture
 
@@ -77,6 +81,7 @@ flowchart LR
     K --> L[Send UDP response]
     K --> M[Append event to /log.txt]
     I --> N[Heartbeat and asynchronous LED blink]
+    H --> O[Background NTP and OTA tasks]
 ```
 
 ### Firmware responsibilities
@@ -88,6 +93,7 @@ mindmap
       Wi-Fi station mode
       SoftAP provisioning
       UDP port 4210
+      OTA updates
     Control
       LED_ON
       LED_OFF
@@ -109,6 +115,12 @@ mindmap
       /teste.txt
       Serial transfer
       UDP transfer
+    Modules
+      StorageManager
+      WifiPortalManager
+      LedManager
+      TelemetryEngine
+      NTPService
 ```
 
 ## Hardware and wiring
@@ -148,20 +160,20 @@ flowchart TB
     SD --> VCC[3.3 V and GND]
 ```
 
-> **Hardware note:** the repository does not currently include a board photograph, PCB layout, or a specified ESP32 board model. Add a real assembly photo to `docs/images/` when available so the gallery can document the exact hardware revision rather than showing a misleading generic image.
+> **Hardware note:** the repository does not currently include a board photograph, PCB layout, or a specified ESP32 board model. Add a real assembly photo to `docs/images/` when available so the build can be reproduced more reliably.
 
 ### Visual pinout sketch
 
 ```text
                          +----------------------+
                          |        ESP32         |
-  microSD CS  ---------- | GPIO13               |
-  microSD MOSI --------- | GPIO23               |
-  microSD MISO --------- | GPIO19               |
-  microSD SCK ---------- | GPIO18               |
-  blue LED ------------- | GPIO2                |
-  green LED ------------ | GPIO15               |
-  reset button --------- | GPIO0  ---- button --+---- GND
+   microSD CS  ---------- | GPIO13               |
+   microSD MOSI --------- | GPIO23               |
+   microSD MISO --------- | GPIO19               |
+   microSD SCK ---------- | GPIO18               |
+   blue LED ------------- | GPIO2                |
+   green LED ------------ | GPIO15               |
+   reset button --------- | GPIO0  ---- button --+---- GND
                          +----------------------+
 ```
 
@@ -239,7 +251,7 @@ The exact `nc` flags vary between Linux, macOS, and Windows builds. Any UDP clie
 ### Arduino IDE
 
 1. Install the Espressif ESP32 board package through **Boards Manager**.
-2. Open `card_wifi.ino`.
+2. Open `Octopus.ino` (or `card_wifi.ino` for the legacy monolithic sketch).
 3. Select the ESP32 board that matches your hardware and the correct serial port.
 4. Insert a FAT/FAT32 microSD card if file features are required.
 5. Upload the sketch.
@@ -254,6 +266,7 @@ The sketch uses these headers, which are provided by the ESP32 Arduino core or s
 - `esp_system.h`
 - `SPI.h`
 - `SD.h`
+- `ArduinoOTA.h`
 
 ## Testing the device
 
@@ -277,7 +290,7 @@ The SD card is initialized with a custom VSPI instance:
 - `MOSI`: GPIO23
 - `CS`: GPIO13
 
-The firmware appends operational messages to `/log.txt`, including received commands, responses, Wi-Fi reset events, and connection information. The file `/teste.txt` is used by the file-transfer test commands and must be placed on the card manually if you want to exercise those paths.
+The firmware appends operational messages to `/log.txt`, including received commands, responses, Wi-Fi reset events, and connection information. The file `/teste.txt` is used by the file-transfer functions and can be read back through UDP or serial commands. The repository's `StorageManager` abstracts this behavior and centralizes SD-card file access.
 
 ## LED and button behavior
 
@@ -287,12 +300,39 @@ The firmware appends operational messages to `/log.txt`, including received comm
 | Blue LED, GPIO2 | Blinks during Wi-Fi connection attempts; can be controlled over UDP |
 | GPIO0 button | When held LOW during an active Wi-Fi connection, clears stored credentials and restarts the configuration portal |
 
+## Source files
+
+The project is organized into a small set of focused modules:
+
+- `defines.h` — shared pin assignments and global configuration constants.
+- `StorageManager.h` / `StorageManager.cpp` — SD-card initialization, file creation, logging, and append operations.
+- `WifiPortalManager.h` / `WifiPortalManager.cpp` — Wi-Fi connection logic, access-point portal, HTTP configuration page, and UDP listener.
+- `LedManager.h` / `LedManager.cpp` — LED state management, blinking, and user feedback routines.
+- `TelemetryEngine.h` / `TelemetryEngine.cpp` — command parsing, diagnostics, and device telemetry responses.
+- `NTPService.h` / `NTPService.cpp` — NTP synchronization and time handling.
+- `Octopus.ino` — main firmware entry point, multi-core task orchestration, and OTA setup.
+- `card_wifi.ino` — legacy or reference sketch kept in the repository for comparison.
+
 ## Project structure
 
 ```text
 .
-├── README.md       # Project documentation, diagrams, pin map, and protocol reference
-└── card_wifi.ino   # Complete ESP32 Arduino firmware
+├── README.md                 # Project documentation, diagrams, pin map, and protocol reference
+├── defines.h                 # Shared pin definitions and configuration constants
+├── Octopus.ino               # Main multitask firmware entry point with OTA support
+├── card_wifi.ino             # Legacy monolithic sketch kept for reference
+├── LedManager.h              # LED control interface
+├── LedManager.cpp            # LED control logic
+├── StorageManager.h          # SD-card and log management interface
+├── StorageManager.cpp        # SD-card and log management logic
+├── WifiPortalManager.h       # Wi-Fi portal and connection management interface
+├── WifiPortalManager.cpp     # Wi-Fi portal and connection management logic
+├── TelemetryEngine.h         # Diagnostics and command execution interface
+├── TelemetryEngine.cpp       # Diagnostics and command execution logic
+├── NTPService.h              # NTP handling interface
+├── NTPService.cpp            # NTP synchronization logic
+├── LICENSE                   # Optional project license file (if added later)
+└── docs/                    # Intended future location for hardware photos and diagrams
 ```
 
 ## Known limitations and next steps
@@ -312,6 +352,6 @@ No license has been declared yet. Until a license is added to the repository, al
 
 <div align="center">
 
-Made for ESP32 prototyping and remote hardware control.
+Made for ESP32 prototyping, remote hardware control, and modular firmware development.
 
 </div>
