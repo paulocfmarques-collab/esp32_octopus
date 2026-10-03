@@ -164,17 +164,52 @@ flowchart TB
 
 ### Visual pinout sketch
 
-```text
-                         +----------------------+
-                         |        ESP32         |
-   microSD CS  ---------- | GPIO13               |
-   microSD MOSI --------- | GPIO23               |
-   microSD MISO --------- | GPIO19               |
-   microSD SCK ---------- | GPIO18               |
-   blue LED ------------- | GPIO2                |
-   green LED ------------ | GPIO15               |
-   reset button --------- | GPIO0  ---- button --+---- GND
-                         +----------------------+
+```mermaid
+graph LR
+    subgraph ESP32["ESP32"]
+        G13[GPIO13]
+        G23[GPIO23]
+        G19[GPIO19]
+        G18[GPIO18]
+        G2[GPIO2]
+        G15[GPIO15]
+        G0[GPIO0]
+    end
+
+    subgraph MicroSD["Módulo microSD"]
+        CS[CS]
+        MOSI[MOSI]
+        MISO[MISO]
+        SCK[SCK]
+    end
+
+    subgraph Componentes["Periféricos e Botões"]
+        B_LED[Blue LED]
+        G_LED[Green LED]
+        BTN[Reset / Boot Button]
+        GND((GND))
+    end
+
+    %% Conexões do microSD
+    G13 --- CS
+    G23 --- MOSI
+    G19 --- MISO
+    G18 --- SCK
+
+    %% Conexões dos LEDs
+    G2  --- B_LED
+    G15 --- G_LED
+
+    %% Conexão do Botão de Reset
+    G0  --- BTN
+    BTN --- GND
+
+    %% Estilos visuais
+    style ESP32 fill:#2c3e50,stroke:#34495e,stroke-width:2px,color:#fff
+    style MicroSD fill:#27ae60,stroke:#2ecc71,stroke-width:2px,color:#fff
+    style Componentes fill:#7f8c8d,stroke:#95a5a6,stroke-width:2px,color:#fff
+    style GND fill:#c0392b,stroke:#e74c3c,color:#fff
+
 ```
 
 ## Provisioning workflow
@@ -315,24 +350,65 @@ The project is organized into a small set of focused modules:
 
 ## Project structure
 
-```text
-.
-├── README.md                 # Project documentation, diagrams, pin map, and protocol reference
-├── defines.h                 # Shared pin definitions and configuration constants
-├── Octopus.ino               # Main multitask firmware entry point with OTA support
-├── card_wifi.ino             # Legacy monolithic sketch kept for reference
-├── LedManager.h              # LED control interface
-├── LedManager.cpp            # LED control logic
-├── StorageManager.h          # SD-card and log management interface
-├── StorageManager.cpp        # SD-card and log management logic
-├── WifiPortalManager.h       # Wi-Fi portal and connection management interface
-├── WifiPortalManager.cpp     # Wi-Fi portal and connection management logic
-├── TelemetryEngine.h         # Diagnostics and command execution interface
-├── TelemetryEngine.cpp       # Diagnostics and command execution logic
-├── NTPService.h              # NTP handling interface
-├── NTPService.cpp            # NTP synchronization logic
-├── LICENSE                   # Optional project license file (if added later)
-└── docs/                    # Intended future location for hardware photos and diagrams
+```mermaid
+graph TD
+    %% Nós principais / Pastas
+    Root["📂 Raiz do Projeto"]
+    Docs["📂 docs/"]
+
+    %% Arquivos da Raiz
+    Readme["📄 README.md<br><small>Documentação, pinos e protocolos</small>"]
+    Defines["📄 defines.h<br><small>Definições de pinos e constantes</small>"]
+    Octopus["📄 Octopus.ino<br><small>Firmware principal (Multitask & OTA)</small>"]
+    CardWifi["📄 card_wifi.ino<br><small>Legado / Monolítico para referência</small>"]
+    License["📄 LICENSE<br><small>Licença do projeto (opcional)</small>"]
+
+    %% Módulos de Código (Agrupados por interface/lógica)
+    subgraph Modulos ["Módulos de Código (C++)"]
+        direction LR
+        subgraph Led ["Gerenciamento de LEDs"]
+            LedH["LedManager.h"] <--> LedCpp["LedManager.cpp"]
+        end
+        
+        subgraph Storage ["Cartão SD e Logs"]
+            StorageH["StorageManager.h"] <--> StorageCpp["StorageManager.cpp"]
+        end
+        
+        subgraph Wifi ["Portal & Conexão Wi-Fi"]
+            WifiH["WifiPortalManager.h"] <--> WifiCpp["WifiPortalManager.cpp"]
+        end
+        
+        subgraph Telemetry ["Diagnósticos & Comandos"]
+            TelemetryH["TelemetryEngine.h"] <--> TelemetryCpp["TelemetryEngine.cpp"]
+        end
+        
+        subgraph NTP ["Sincronização de Tempo"]
+            NtpH["NTPService.h"] <--> NtpCpp["NTPService.cpp"]
+        end
+    end
+
+    %% Arquivos da pasta Docs
+    DocsInfo["📷 Fotos do hardware e diagramas futuros"]
+
+    %% Conexões da Árvore
+    Root --> Readme
+    Root --> Defines
+    Root --> Octopus
+    Root --> CardWifi
+    Root --> Modulos
+    Root --> License
+    Root --> Docs
+    Docs --> DocsInfo
+
+    %% Estilização
+    classDef folder fill:#2c3e50,stroke:#34495e,stroke-width:2px,color:#fff;
+    classDef file fill:#ecf0f1,stroke:#bdc3c7,stroke-width:1px,color:#2c3e50;
+    classDef module fill:#f39c12,stroke:#d35400,stroke-width:1px,color:#fff;
+    
+    class Root,Docs folder;
+    class Readme,Defines,Octopus,CardWifi,License,DocsInfo file;
+    class LedH,LedCpp,StorageH,StorageCpp,WifiH,WifiCpp,TelemetryH,TelemetryCpp,NtpH,NtpCpp module;
+
 ```
 
 ## Known limitations and next steps
