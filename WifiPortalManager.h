@@ -36,6 +36,9 @@ public:
     int getFusoHorario();
     bool getHorarioVerao();
     void setNtpConfig(int fuso, bool dst);
+
+    IPAddress getUdpRemoteIP() { return _udp.remoteIP(); }
+    uint16_t getUdpRemotePort() { return _udp.remotePort(); }
 };
 
 #endif

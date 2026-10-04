@@ -14,11 +14,16 @@ void LedManager::begin() {
 void LedManager::atualizar() {
     unsigned long agora = millis();
 
-    // LED VERDE - Frequência fixa de 1 segundo (Heartbeat)
-    if (agora - _tempoVerde >= 1000) {
-        _tempoVerde = agora;
-        _estadoVerde = !_estadoVerde;
-        digitalWrite(_greenPin, _estadoVerde);
+    // LED VERDE - Heartbeat ativo apenas se NÃO estiver varrendo a rede
+    if (!_modoVarreduraAtivo) {
+        if (agora - _tempoVerde >= 1000) {
+            _tempoVerde = agora;
+            _estadoVerde = !_estadoVerde;
+            digitalWrite(_greenPin, _estadoVerde);
+        }
+    } else {
+        // Garante que o verde permaneça desligado de forma segura no fluxo lógico
+        digitalWrite(_greenPin, LOW);
     }
 
     // LED AZUL - Blink Dinâmico Assíncrono via comandos UDP

@@ -21,6 +21,9 @@ namespace Config {
     
     // Configuração do RTOS
     constexpr uint8_t TAMANHO_FILA_UDP = 10; // Suporta até 10 comandos enfileirados na RAM
+
+    constexpr float DivMb = (float)(1024*1024);
+    constexpr float DivKb = (float)(1024);
 }
 
 #endif

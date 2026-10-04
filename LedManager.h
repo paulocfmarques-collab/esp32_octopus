@@ -15,6 +15,7 @@ private:
     bool _estadoVerde;
     bool _estadoAzul;
     bool _blinkAtivo;
+    bool _modoVarreduraAtivo = false;
 
 public:
     LedManager(uint8_t bluePin, uint8_t greenPin);

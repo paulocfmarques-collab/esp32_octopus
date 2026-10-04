@@ -25,6 +25,7 @@ struct ComandoUDP {
     char texto[255];
 };
 
+
 void TaskRadioCore0(void *pvParameters);
 void TaskProcessorCore1(void *pvParameters);
 void TaskOtaCore0(void *pvParameters); // Protótipo da nova Task de segundo plano
@@ -120,6 +121,13 @@ void TaskRadioCore0(void *pvParameters) {
         if (network.isConnected()) {
             String msgUdpRecebida;
             if (network.checarMensagensUDP(msgUdpRecebida)) {
+                
+                // ─── ATUALIZAÇÃO: CAPTURA DAS CREDENCIAIS NAS VARIÁVEIS ESTÁTICAS ───
+                String ipRemoto = network.getUdpRemoteIP().toString();
+                snprintf(TelemetryEngine::ultimoClienteIP, sizeof(TelemetryEngine::ultimoClienteIP), "%s", ipRemoto.c_str());
+                TelemetryEngine::ultimoClientePorta = network.getUdpRemotePort();
+
+                // Envia apenas o texto na fila original
                 ComandoUDP novoComando;
                 snprintf(novoComando.texto, sizeof(novoComando.texto), "%s", msgUdpRecebida.c_str());
                 xQueueSend(filaComandosUDP, &novoComando, 0);
@@ -143,6 +151,7 @@ void TaskProcessorCore1(void *pvParameters) {
         leds.atualizar();
 
         if (xQueueReceive(filaComandosUDP, &comandoRecebido, pdMS_TO_TICKS(10)) == pdTRUE) {
+            // CORREÇÃO: Chama a assinatura original sem os parâmetros que geraram o erro
             telemetry.executarComando(String(comandoRecebido.texto));
         }
 
@@ -172,7 +181,7 @@ void TaskProcessorCore1(void *pvParameters) {
 // ================= NOVA TAREFA EXCLUSIVA DE BACKGROUND: OTA (NÚCLEO 0) =================
 void TaskOtaCore0(void *pvParameters) {
     (void) pvParameters;
-    Serial.println(F("[RTOS_BOOT] TaskOtaCore0 em background ativa no Core 0."));
+    Serial.println(F("[RTOS_BOOT] TaskOtaCore0 em background ativa no Core 0.\n"));
     
     esp_task_wdt_user_handle_t wdt_handle = NULL;
     esp_task_wdt_add_user("WdtOtaCore0", &wdt_handle);
@@ -187,16 +196,28 @@ void TaskOtaCore0(void *pvParameters) {
     }
 }
 
-// ================= CONFIGURAÇÃO VISUAL DAS ROTINAS DO OTA =================
+// ================= CONFIGURAÇÃO VISUAL E PROTEÇÃO DO OTA =================
 void inicializarConfiguracaoOTA() {
     ArduinoOTA.setHostname("OCTOPUS_NODE");
 
     ArduinoOTA.onStart([]() {
         Serial.println(F("\n[OTA] Gravacao remota iniciada! Bloqueando operacoes..."));
+        
+        // ─── DRIBALNDO O WATCHDOG NO OTA ───
+        // Desconfigura temporariamente o pânico do Watchdog para permitir a gravação na Flash
+        esp_task_wdt_config_t twdt_disable_config = {
+            .timeout_ms = 30000,                  // Aumenta o limite para 30 segundos (tempo de sobra para o upload)
+            .idle_core_mask = 0,                   // Desativa o monitoramento de idle nos Cores durante o flash
+            .trigger_panic = false                 // Impede o reset por pânico por completo
+        };
+        esp_task_wdt_reconfigure(&twdt_disable_config);
+        
+        Serial.println(F("[WDT] Temporizador suavizado para o processo de Upload."));
     });
     
     ArduinoOTA.onEnd([]() {
         Serial.println(F("\n[OTA] SUCESSO! Firmware gravado. Reiniciando processador..."));
+        // Não precisamos reativar o WDT aqui, pois o ESP.restart() vai inicializar o chip do zero
     });
     
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
@@ -205,6 +226,16 @@ void inicializarConfiguracaoOTA() {
     
     ArduinoOTA.onError([](ota_error_t error) {
         Serial.printf("[OTA] Erro encontrado, Codigo: [%u]\n", error);
+        
+        // Se o upload falhar por qualquer motivo (perda de sinal, arquivo corrompido), 
+        // reativamos o Watchdog original de 5 segundos para o sistema não ficar vulnerável
+        esp_task_wdt_config_t twdt_config = {
+            .timeout_ms = 5000,                    
+            .idle_core_mask = (1 << 0) | (1 << 1), 
+            .trigger_panic = true                  
+        };
+        esp_task_wdt_reconfigure(&twdt_config);
+        Serial.println(F("[WDT] Upload falhou. Watchdog de seguranca restaurado para 5s."));
     });
 
     ArduinoOTA.begin();
