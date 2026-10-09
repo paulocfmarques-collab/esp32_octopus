@@ -1,4 +1,3 @@
-// TelemetryEngine.h
 #ifndef TELEMETRY_ENGINE_H
 #define TELEMETRY_ENGINE_H
 
@@ -13,8 +12,8 @@ public:
     void executarComando(String cmd);
     void streamFileUDP(const char* filename);
 
-    // Mantido de forma segura para que todas as respostas UDP funcionem perfeitamente
-    static char ultimoClienteIP[16];   
+    // Variáveis estáticas primitivas para respostas de chamadas assíncronas
+    static char ultimoClienteIP[16];
     static uint16_t ultimoClientePorta;
 
 private:

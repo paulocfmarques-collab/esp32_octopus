@@ -9,13 +9,11 @@ class NTPService {
 public:
     bool inicializar();
     void configurarRelogio(int fuso, bool dstAtivo);
-    String obterApenasHora();
-    String obterApenasData();
     void carregarEConfigurarHorario();
     void atualizarFuso(int novoFuso);
     void atualizarDST(bool novoDstAtivo);
+    String obterApenasHora();
+    String obterApenasData();
 };
-
-extern NTPService ntp;
 
 #endif

@@ -17,7 +17,7 @@ bool StorageManager::inicializar() {
 void StorageManager::gravarLog(const String& mensagem) {
     if (!_sdcardOk) return;
 
-    // Sistema de rotação automática de logs
+    // Sistema de rotação automática de logs de 500KB
     if (SD.exists("/log.txt")) {
         File checkFile = SD.open("/log.txt", FILE_READ);
         if (checkFile) {

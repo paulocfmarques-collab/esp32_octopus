@@ -1,10 +1,12 @@
-// TelemetryEngine.cpp
+// TelemetryEngine.cpp - Parte 1 de 2
 #include "TelemetryEngine.h"
 #include "NTPService.h"
 #include "defines.h"
 #include "esp_system.h"
 #include <WiFi.h>
 #include <esp_task_wdt.h>
+
+extern NTPService ntp;
 
 // Inicialização das variáveis estáticas primitivas para respostas estáveis
 char TelemetryEngine::ultimoClienteIP[16] = "0.0.0.0";
@@ -54,7 +56,7 @@ void TelemetryEngine::executarComando(String cmd) {
         String listaComandos = 
             "--- Comandos Disponiveis ---\n"
             "info / status / version / build / reason\n"
-            "reboot / reset_wifi / alive\n"
+            "reboot / reset_wifi / wifi_list / alive\n"
             "temp / cpu / ram / heap / flash / uptime\n"
             "net_info / mac / rssi / ip\n"
             "time / date\n"
@@ -88,7 +90,6 @@ void TelemetryEngine::executarComando(String cmd) {
     else if (cmdLower == "temp") {
         _network.responderUDP("CPU Temp: " + String(temperatureRead(), 2) + " C");
     }
-    // ─── 1. COMANDO: RESET DO WIFI ───
     else if (cmdLower == "reboot") {
         _network.responderUDP("Reiniciando...\n");
         delay(200);
@@ -97,6 +98,7 @@ void TelemetryEngine::executarComando(String cmd) {
     else if (cmdLower == "alive") {
         _network.responderUDP("ip: " + WiFi.localIP().toString() + " - yes\n");
     }
+// TelemetryEngine.cpp - Parte 2 de 2 (Continuação direta do bloco anterior)
     else if (cmdLower == "heap") {
         _network.responderUDP("Heap livre: " + String(ESP.getFreeHeap() / 1024) + " KB\n");
     }
@@ -115,7 +117,10 @@ void TelemetryEngine::executarComando(String cmd) {
         _leds.piscarSincrono(10, 100); 
         ESP.restart();
     }
-    // ─── 2. COMANDOS DOS LEDS ───
+    else if (cmdLower == "wifi_list") {
+        String listagem = _network.obterListaRedesTXT();
+        _network.responderUDP(listagem);
+    }
     else if (cmdLower == "led_on") { 
         _leds.ligar(); 
         _network.responderUDP("LED Ativo\n"); 
@@ -131,14 +136,12 @@ void TelemetryEngine::executarComando(String cmd) {
         _leds.iniciarBlinkAsync(ms); 
         _network.responderUDP("LED piscando a cada " + String(ms) + " ms\n");
     }
-    // ─── 3. COMANDOS DE DATA E HORA ───
     else if (cmdLower == "time") {
         _network.responderUDP("Hora atual: " + ntp.obterApenasHora() + "\n");
     }
     else if (cmdLower == "date") {
         _network.responderUDP("Data atual: " + ntp.obterApenasData() + "\n");
     }
-    // ─── 4. DIAGNÓSTICOS DO SISTEMA ───
     else if (cmdLower == "flash") {
         snprintf(reply, sizeof(reply), "Flash total: %0.2f MB\nVelocidade: %u\nSketch: %0.2f MB\nLivre: %0.2f MB\n", 
                 (float)ESP.getFlashChipSize() / Config::DivMb, ESP.getFlashChipSpeed(), (float)ESP.getSketchSize() / Config::DivMb, (float)ESP.getFreeSketchSpace() / Config::DivMb);
@@ -154,12 +157,10 @@ void TelemetryEngine::executarComando(String cmd) {
                 ESP.getChipModel(), ESP.getChipRevision(), ESP.getChipCores(), ESP.getCpuFreqMHz(), ESP.getFreeHeap());
         _network.responderUDP(String(reply));
     }
-    // ─── 5. GERENCIAMENTO DE LOGS ───
     else if (cmdLower == "sd_log") streamFileUDP("/log.txt");
     else if (cmdLower == "sd_clear_log") {
         _network.responderUDP(_storage.deletarArquivo("/log.txt") ? "Log principal deletado.\n" : "Falha ao deletar.\n");
     }
-    // ─── 6. COMANDO DE LISTAGEM DO SD ───
     else if (cmdLower == "sd_list") {
         if (!_storage.isAtivo()) { 
             _network.responderUDP("Erro: SD inacessivel\n"); 
@@ -179,7 +180,6 @@ void TelemetryEngine::executarComando(String cmd) {
             raiz.close();
         }
     }
-    // ─── 7. COMANDO: DETERMINAR TAMANHO DE ARQUIVO ───
     else if (cmdLower.startsWith("sd_size:")) {
         String caminho = cmd.substring(8); caminho.trim(); 
         if (!caminho.startsWith("/")) caminho = "/" + caminho;
@@ -194,13 +194,11 @@ void TelemetryEngine::executarComando(String cmd) {
             _network.responderUDP(String(pMsg));
         }
     }
-    // ─── 8. COMANDO: LER ARQUIVO BRUTO DO SD ───
     else if (cmdLower.startsWith("sd_read:")) {
         String caminho = cmd.substring(8); caminho.trim(); 
         if (!caminho.startsWith("/")) caminho = "/" + caminho;
         streamFileUDP(caminho.c_str());
     }
-    // ─── 9. COMANDO: ESCREVER DADOS NO SD ───
     else if (cmdLower.startsWith("sd_write:")) {
         String dadosGerais = cmd.substring(9); 
         int idx = dadosGerais.indexOf(':');
@@ -218,7 +216,6 @@ void TelemetryEngine::executarComando(String cmd) {
             _network.responderUDP("Ok\n");
         }
     }
-    // ─── 10. PAINEL DE INFORMAÇÕES CONSOLIDADO (INFO) ───
     else if (cmdLower == "info") {
         char infoBuffer[512]; 
         uint32_t heapLivreKB = ESP.getFreeHeap() / 1024;
@@ -240,7 +237,6 @@ void TelemetryEngine::executarComando(String cmd) {
         snprintf(reply, sizeof(reply), "IP: %s\nSSID: %s\nRSSI: %d dBm\n", WiFi.localIP().toString().c_str(), WiFi.SSID().c_str(), WiFi.RSSI());
         _network.responderUDP(String(reply));
     }
-    // ─── 11. COMANDO DIAGNÓSTICO DO MOTIVO DO RESET ───
     else if (cmdLower == "reason") {
         esp_reset_reason_t r = esp_reset_reason();
         String txt = (r == ESP_RST_POWERON) ? "POWER_ON" : 
@@ -248,7 +244,6 @@ void TelemetryEngine::executarComando(String cmd) {
                      (r == ESP_RST_TASK_WDT) ? "TASK_WATCHDOG" : "SOFTWARE/OUTROS";
         _network.responderUDP("Ultimo Reset: [" + txt + "]\n");
     }
-    // ─── 12. TRATAMENTO DE COMANDO DESCONHECIDO ───
     else if (cmdLower.startsWith("sd_del:")) {
         String caminho = cmd.substring(7); caminho.trim();
         if (!caminho.startsWith("/")) caminho = "/" + caminho;

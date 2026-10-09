@@ -14,7 +14,7 @@ void LedManager::begin() {
 void LedManager::atualizar() {
     unsigned long agora = millis();
 
-    // LED VERDE - Heartbeat ativo apenas se NÃO estiver varrendo a rede
+    // LED VERDE - Heartbeat ativo apenas se NAO estiver varrendo a rede
     if (!_modoVarreduraAtivo) {
         if (agora - _tempoVerde >= 1000) {
             _tempoVerde = agora;
@@ -22,7 +22,6 @@ void LedManager::atualizar() {
             digitalWrite(_greenPin, _estadoVerde);
         }
     } else {
-        // Garante que o verde permaneça desligado de forma segura no fluxo lógico
         digitalWrite(_greenPin, LOW);
     }
 
