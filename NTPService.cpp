@@ -1,12 +1,15 @@
 #include "NTPService.h"
 
-bool NTPService::inicializar() {
+bool NTPService::inicializar()
+{
     Serial.println(F("[NTP] Inicializando sincronizacao de tempo..."));
     carregarEConfigurarHorario();
 
-    for (int tentativa = 0; tentativa < 15; tentativa++) {
+    for (int tentativa = 0; tentativa < 15; tentativa++)
+    {
         struct tm timeinfo;
-        if (getLocalTime(&timeinfo, 1000)) {
+        if (getLocalTime(&timeinfo, 1000))
+        {
             Serial.println(F("[NTP] Sincronizacao concluida com sucesso."));
             return true;
         }
@@ -17,20 +20,26 @@ bool NTPService::inicializar() {
     return false;
 }
 
-void NTPService::configurarRelogio(int fuso, bool dstAtivo) {
+void NTPService::configurarRelogio(int fuso, bool dstAtivo)
+{
     char tzString[64];
     int fusoInvertido = -fuso; // Inversão POSIX para o ESP32
 
-    if (dstAtivo) {
-        snprintf(tzString, sizeof(tzString), "GMT%dGMT%d,M10.3.0/0,M2.3.0/0", fusoInvertido, fusoInvertido - 1);
-    } else {
+    if (dstAtivo)
+    {
+        snprintf(tzString, sizeof(tzString), "GMT%dGMT%d,M10.3.0/0,M2.3.0/0", fusoInvertido,
+                 fusoInvertido - 1);
+    }
+    else
+    {
         snprintf(tzString, sizeof(tzString), "GMT%d", fusoInvertido);
     }
-    
+
     configTzTime(tzString, "a.st1.ntp.br", "pool.ntp.org", "time.nist.gov");
 }
 
-void NTPService::carregarEConfigurarHorario() {
+void NTPService::carregarEConfigurarHorario()
+{
     Preferences prefs;
     prefs.begin("relogio", true);
     int fuso = prefs.getInt("gmt", -3);
@@ -40,7 +49,8 @@ void NTPService::carregarEConfigurarHorario() {
     configurarRelogio(fuso, dst);
 }
 
-void NTPService::atualizarFuso(int novoFuso) {
+void NTPService::atualizarFuso(int novoFuso)
+{
     Preferences prefs;
     prefs.begin("relogio", false);
     prefs.putInt("gmt", novoFuso);
@@ -48,7 +58,8 @@ void NTPService::atualizarFuso(int novoFuso) {
     carregarEConfigurarHorario();
 }
 
-void NTPService::atualizarDST(bool novoDstAtivo) {
+void NTPService::atualizarDST(bool novoDstAtivo)
+{
     Preferences prefs;
     prefs.begin("relogio", false);
     prefs.putBool("dst", novoDstAtivo);
@@ -56,18 +67,24 @@ void NTPService::atualizarDST(bool novoDstAtivo) {
     carregarEConfigurarHorario();
 }
 
-String NTPService::obterApenasHora() {
+String NTPService::obterApenasHora()
+{
     struct tm timeinfo;
-    if (!getLocalTime(&timeinfo, 50)) return "00:00:00";
+    if (!getLocalTime(&timeinfo, 50))
+        return "00:00:00";
     char buffer[16];
-    snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min,
+             timeinfo.tm_sec);
     return String(buffer);
 }
 
-String NTPService::obterApenasData() {
+String NTPService::obterApenasData()
+{
     struct tm timeinfo;
-    if (!getLocalTime(&timeinfo, 50)) return "00/00/0000";
+    if (!getLocalTime(&timeinfo, 50))
+        return "00/00/0000";
     char buffer[16];
-    snprintf(buffer, sizeof(buffer), "%02d/%02d/%04d", timeinfo.tm_mday, timeinfo.tm_mon + 1, timeinfo.tm_year + 1900);
+    snprintf(buffer, sizeof(buffer), "%02d/%02d/%04d", timeinfo.tm_mday, timeinfo.tm_mon + 1,
+             timeinfo.tm_year + 1900);
     return String(buffer);
 }

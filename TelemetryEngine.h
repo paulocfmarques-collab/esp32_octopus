@@ -10,7 +10,7 @@ class TelemetryEngine {
 public:
     TelemetryEngine(StorageManager& storage, WifiPortalManager& network, LedManager& leds);
     void executarComando(String cmd);
-    void streamFileUDP(const char* filename);
+    bool streamFileUDP(const char* filename);
 
     // Variáveis estáticas primitivas para respostas de chamadas assíncronas
     static char ultimoClienteIP[16];

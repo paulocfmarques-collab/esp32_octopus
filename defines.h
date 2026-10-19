@@ -4,11 +4,13 @@
 #include <Arduino.h>
 
 namespace Config {
+    constexpr const char* FIRMWARE_VERSION = "v1.3.0";
     // Pinos do Cartão SD (VSPI Original)
     constexpr uint8_t PIN_SD_CS   = 13;
     constexpr uint8_t PIN_SD_MOSI = 23;
     constexpr uint8_t PIN_SD_MISO = 19;
     constexpr uint8_t PIN_SD_SCK  = 18;
+    constexpr uint32_t SD_SPI_FREQUENCY_HZ = 4000000; // Mesmo padrao do SD.begin do Arduino ESP32.
 
     // Pinos dos LEDs e Botão
     constexpr uint8_t PIN_LED_BLUE = 2;

@@ -3,10 +3,15 @@
 #include "NTPService.h"
 #include "defines.h"
 #include "esp_system.h"
+#include "CrashDiagnostics.h"
+#include "PrometheusMetrics.h"
+#include "ClimaService.h"
+extern ClimaService clima;
 #include <WiFi.h>
 #include <esp_task_wdt.h>
 
 extern NTPService ntp;
+extern PrometheusMetrics prometheus;
 
 // Inicialização das variáveis estáticas primitivas para respostas estáveis
 char TelemetryEngine::ultimoClienteIP[16] = "0.0.0.0";
@@ -14,22 +19,30 @@ uint16_t TelemetryEngine::ultimoClientePorta = 4210;
 
 TelemetryEngine::TelemetryEngine(StorageManager& storage, WifiPortalManager& network,
                                  LedManager& leds)
-    : _storage(storage), _network(network), _leds(leds) {}
+    : _storage(storage), _network(network), _leds(leds)
+{
+}
 
-void TelemetryEngine::streamFileUDP(const char* filename) {
-    if (!_storage.arquivoExiste(filename)) {
+bool TelemetryEngine::streamFileUDP(const char* filename)
+{
+    if (!_storage.arquivoExiste(filename))
+    {
         _network.responderUDP("Erro: Arquivo nao encontrado.\n");
-        return;
+        return false;
     }
 
     File file = _storage.abrirArquivo(filename, FILE_READ);
-    if (!file) {
+    if (!file)
+    {
         _network.responderUDP("Erro ao abrir arquivo.\n");
-        return;
+        return false;
     }
 
     _network.responderUDP("--- Stream Inicio ---\n");
-    while (file.available()) {
+    // Limita a leitura ao tamanho inicial, inclusive ao consultar o próprio log UDP.
+    const size_t tamanhoInicial = file.size();
+    while (file.available() && file.position() < tamanhoInicial)
+    {
         String linha = file.readStringUntil('\n') + "\n";
         _network.responderUDP(linha);
 
@@ -39,28 +52,29 @@ void TelemetryEngine::streamFileUDP(const char* filename) {
     }
     _network.responderUDP("--- Stream Fim ---\n");
     file.close();
+    return true;
 }
 
-void TelemetryEngine::executarComando(String cmd) {
+void TelemetryEngine::executarComando(String cmd)
+{
+    PrometheusRequest request(prometheus, true);
     cmd.trim();
     Serial.printf("[UDP CMD] Processando: '%s'\n", cmd.c_str());
 
     char reply[256];
-    snprintf(reply, sizeof(reply), "Comando recebido: %s\n", cmd.c_str());
-    if (_storage.isAtivo())
-        _storage.gravarLog(reply);
 
     String cmdLower = cmd;
     cmdLower.toLowerCase();
 
     // ─── 0. COMANDO: LISTAR TODOS OS COMANDOS (HELP) ───
-    if (cmdLower == "help") {
+    if (cmdLower == "help")
+    {
         String listaComandos = "--- Comandos Disponiveis ---\n"
-                               "info / status / version / build / reason\n"
-                               "reboot / reset_wifi / wifi_list / alive\n"
+                               "info / status / version / build / reason / crash_info\n"
+                               "reboot / reset_wifi / reset_counters / wifi_list / alive / name\n"
                                "temp / cpu / ram / heap / flash / uptime\n"
                                "net_info / mac / rssi / ip\n"
-                               "time / date\n"
+                               "time / date / age\n"
                                "led_on / led_off / led_blink[:ms]\n"
                                "--- SD ---\n"
                                "sd_status / sd_list / sd_log / sd_clear_log\n"
@@ -68,99 +82,169 @@ void TelemetryEngine::executarComando(String cmd) {
                                "sd_write:/arq:texto / sd_del:/arq\n"
                                "----------------------------\n";
         _network.responderUDP(listaComandos);
-    } else if (cmdLower == "status") {
+    }
+    else if (cmdLower == "age")
+    {
+        _network.responderUDP(clima.obterIdade());
+    }
+    else if (cmdLower == "name")
+    {
+        _network.responderUDP("Octopus\n");
+    }
+    else if (cmdLower == "reset_counters")
+    {
+        _network.responderUDP(prometheus.resetCounters()
+                                  ? "Contadores NVS de boot/watchdog zerados.\n"
+                                  : "Erro ao zerar contadores NVS.\n");
+    }
+    else if (cmdLower == "status")
+    {
         String statusWifi = (WiFi.status() == WL_CONNECTED) ? "OK" : "FALHA";
         String storageStatus = (_storage.isAtivo() ? "OK" : "FALHA");
         uint32_t heapKB = ESP.getFreeHeap() / 1024;
         _network.responderUDP("ONLINE\nWiFi: " + statusWifi + "\nSD: " + storageStatus +
                               "\nNTP: OK\nHeap: " + String(heapKB) + " KB");
-    } else if (cmdLower == "uptime") {
+    }
+    else if (cmdLower == "uptime")
+    {
         snprintf(reply, sizeof(reply), "Uptime: %lu s\n", millis() / 1000);
         _network.responderUDP(String(reply));
-    } else if (cmdLower == "version") {
-        _network.responderUDP("Versao Firmware: v1.0.0");
-    } else if (cmdLower == "build") {
+    }
+    else if (cmdLower == "version")
+    {
+        _network.responderUDP("Versao Firmware: " + String(Config::FIRMWARE_VERSION));
+    }
+    else if (cmdLower == "build")
+    {
         _network.responderUDP("Build:\nData: " + String(__DATE__) + "\nHora: " + String(__TIME__));
-    } else if (cmdLower == "mac") {
+    }
+    else if (cmdLower == "mac")
+    {
         _network.responderUDP("MAC: " + WiFi.macAddress() + "\n");
-    } else if (cmdLower == "temp") {
+    }
+    else if (cmdLower == "temp")
+    {
         _network.responderUDP("CPU Temp: " + String(temperatureRead(), 2) + " C");
-    } else if (cmdLower == "reboot") {
+    }
+    else if (cmdLower == "reboot")
+    {
         _network.responderUDP("Reiniciando...\n");
         delay(200);
         ESP.restart();
-    } else if (cmdLower == "alive") {
+    }
+    else if (cmdLower == "alive")
+    {
         _network.responderUDP("alive\n");
     }
     // TelemetryEngine.cpp - Parte 2 de 2 (Continuação direta do bloco anterior)
-    else if (cmdLower == "heap") {
+    else if (cmdLower == "heap")
+    {
         _network.responderUDP("Heap livre: " + String(ESP.getFreeHeap() / 1024) + " KB\n");
-    } else if (cmdLower == "rssi") {
+    }
+    else if (cmdLower == "rssi")
+    {
         _network.responderUDP("RSSI: " + String(WiFi.RSSI()) + " dBm\n");
-    } else if (cmdLower == "ip") {
+    }
+    else if (cmdLower == "ip")
+    {
         _network.responderUDP("IP: " + WiFi.localIP().toString() + "\n");
-    } else if (cmdLower == "sd_status") {
+    }
+    else if (cmdLower == "sd_status")
+    {
         _network.responderUDP(String("SD: ") + (_storage.isAtivo() ? "OK" : "FALHA") + "\n");
-    } else if (cmdLower == "reset_wifi") {
+    }
+    else if (cmdLower == "reset_wifi")
+    {
         _network.responderUDP("Resetando rede e voltando ao modo Portal...\n");
         _network.clearConfig();
         _leds.piscarSincrono(10, 100);
         ESP.restart();
-    } else if (cmdLower == "wifi_list") {
+    }
+    else if (cmdLower == "wifi_list")
+    {
         String listagem = _network.obterListaRedesTXT();
         _network.responderUDP(listagem);
-    } else if (cmdLower == "led_on") {
+    }
+    else if (cmdLower == "led_on")
+    {
         _leds.ligar();
         _network.responderUDP("LED Ativo\n");
-    } else if (cmdLower == "led_off") {
+    }
+    else if (cmdLower == "led_off")
+    {
         _leds.desligar();
         _network.responderUDP("LED Desativado\n");
-    } else if (cmdLower.startsWith("led_blink")) {
+    }
+    else if (cmdLower.startsWith("led_blink"))
+    {
         int p = cmd.indexOf(':');
         unsigned long ms = (p > 0) ? (unsigned long)cmd.substring(p + 1).toInt() : 1000;
         if (ms < 50)
             ms = 50;
         _leds.iniciarBlinkAsync(ms);
         _network.responderUDP("LED piscando a cada " + String(ms) + " ms\n");
-    } else if (cmdLower == "time") {
+    }
+    else if (cmdLower == "time")
+    {
         _network.responderUDP("Hora atual: " + ntp.obterApenasHora() + "\n");
-    } else if (cmdLower == "date") {
+    }
+    else if (cmdLower == "date")
+    {
         _network.responderUDP("Data atual: " + ntp.obterApenasData() + "\n");
-    } else if (cmdLower == "flash") {
+    }
+    else if (cmdLower == "flash")
+    {
         snprintf(reply, sizeof(reply),
                  "Flash total: %0.2f MB\nVelocidade: %u\nSketch: %0.2f MB\nLivre: %0.2f MB\n",
                  (float)ESP.getFlashChipSize() / Config::DivMb, ESP.getFlashChipSpeed(),
                  (float)ESP.getSketchSize() / Config::DivMb,
                  (float)ESP.getFreeSketchSpace() / Config::DivMb);
         _network.responderUDP(String(reply));
-    } else if (cmdLower == "ram") {
+    }
+    else if (cmdLower == "ram")
+    {
         snprintf(reply, sizeof(reply),
                  "Heap livre: %0.2f kb\nMenor heap livre: %.02f kb\nMaior bloco livre: %0.2f kb\n",
                  ESP.getFreeHeap() / Config::DivKb, ESP.getMinFreeHeap() / Config::DivKb,
                  ESP.getMaxAllocHeap() / Config::DivKb);
         _network.responderUDP(String(reply));
-    } else if (cmdLower == "cpu") {
+    }
+    else if (cmdLower == "cpu")
+    {
         snprintf(reply, sizeof(reply),
                  "Modelo: %s\nRevisao: %d\nNucleos: %d\nCPU: %d MHz\nRAM livre: %u bytes\n",
                  ESP.getChipModel(), ESP.getChipRevision(), ESP.getChipCores(), ESP.getCpuFreqMHz(),
                  ESP.getFreeHeap());
         _network.responderUDP(String(reply));
-    } else if (cmdLower == "sd_log")
-        streamFileUDP("/log.txt");
-    else if (cmdLower == "sd_clear_log") {
-        _network.responderUDP(_storage.deletarArquivo("/log.txt") ? "Log principal deletado.\n"
-                                                                  : "Falha ao deletar.\n");
-    } else if (cmdLower == "sd_list") {
-        if (!_storage.isAtivo()) {
+    }
+    else if (cmdLower == "sd_log")
+        request.erro = !streamFileUDP("/log.txt");
+    else if (cmdLower == "sd_clear_log")
+    {
+        bool ok = _storage.deletarArquivo("/log.txt");
+        request.erro = !ok;
+        _network.responderUDP(ok ? "Log principal deletado.\n" : "Falha ao deletar.\n");
+    }
+    else if (cmdLower.startsWith("sd_list"))
+    {
+        if (!_storage.isAtivo())
+        {
+            request.erro = true;
             _network.responderUDP("Erro: SD inacessivel\n");
-        } else {
+        }
+        else
+        {
             File raiz = SD.open("/");
             File arquivo = raiz.openNextFile();
-            if (!arquivo) {
+            if (!arquivo)
+            {
                 _network.responderUDP("Diretorio vazio\n");
-            } else {
+            }
+            else
+            {
                 _network.responderUDP("--- Arquivos SD ---\n");
-                while (arquivo) {
+                while (arquivo)
+                {
                     _network.responderUDP(String(arquivo.name()) + " (" + String(arquivo.size()) +
                                           " B)\n");
                     arquivo = raiz.openNextFile();
@@ -169,33 +253,47 @@ void TelemetryEngine::executarComando(String cmd) {
             }
             raiz.close();
         }
-    } else if (cmdLower.startsWith("sd_size:")) {
+    }
+    else if (cmdLower.startsWith("sd_size:"))
+    {
         String caminho = cmd.substring(8);
         caminho.trim();
         if (!caminho.startsWith("/"))
             caminho = "/" + caminho;
 
-        if (!_storage.arquivoExiste(caminho.c_str())) {
+        if (!_storage.arquivoExiste(caminho.c_str()))
+        {
+            request.erro = true;
             _network.responderUDP("Nao existe\n");
-        } else {
+        }
+        else
+        {
             File arquivo = _storage.abrirArquivo(caminho.c_str(), FILE_READ);
             char pMsg[64];
             sprintf(pMsg, "Tamanho: %u B\n", arquivo.size());
             arquivo.close();
             _network.responderUDP(String(pMsg));
         }
-    } else if (cmdLower.startsWith("sd_read:")) {
+    }
+    else if (cmdLower.startsWith("sd_read:"))
+    {
         String caminho = cmd.substring(8);
         caminho.trim();
         if (!caminho.startsWith("/"))
             caminho = "/" + caminho;
-        streamFileUDP(caminho.c_str());
-    } else if (cmdLower.startsWith("sd_write:")) {
+        request.erro = !streamFileUDP(caminho.c_str());
+    }
+    else if (cmdLower.startsWith("sd_write:"))
+    {
         String dadosGerais = cmd.substring(9);
         int idx = dadosGerais.indexOf(':');
-        if (idx == -1) {
+        if (idx == -1)
+        {
+            request.erro = true;
             _network.responderUDP("Erro: Use sd_write:/a.txt:conteudo\n");
-        } else {
+        }
+        else
+        {
             String caminho = dadosGerais.substring(0, idx);
             String conteudo = dadosGerais.substring(idx + 1);
             caminho.trim();
@@ -203,50 +301,59 @@ void TelemetryEngine::executarComando(String cmd) {
                 caminho = "/" + caminho;
 
             File arquivo = _storage.abrirArquivo(caminho.c_str(), FILE_WRITE);
-            arquivo.print(conteudo);
+            bool ok = arquivo && arquivo.print(conteudo) == conteudo.length();
             arquivo.close();
-            _network.responderUDP("Ok\n");
+            request.erro = !ok;
+            _network.responderUDP(ok ? "Ok\n" : "Falha ao gravar arquivo\n");
         }
-    } else if (cmdLower == "info") {
+    }
+    else if (cmdLower == "info")
+    {
         char infoBuffer[512];
         uint32_t heapLivreKB = ESP.getFreeHeap() / 1024;
         float flashLivreMB = (float)ESP.getFreeSketchSpace() / (1024.0 * 1024.0);
         String statusSD = _storage.isAtivo() ? "OK" : "FALHA";
 
-        esp_reset_reason_t motivoRaw = esp_reset_reason();
-        String rStr = (motivoRaw == ESP_RST_TASK_WDT)  ? "TASK_WATCHDOG"
-                      : (motivoRaw == ESP_RST_POWERON) ? "POWER_ON"
-                      : (motivoRaw == ESP_RST_EXT)     ? "PIN_RESET"
-                                                       : "SOFTWARE_RESET";
+        String rStr = CrashDiagnostics::motivoReset();
 
         snprintf(infoBuffer, sizeof(infoBuffer),
-                 "===== DEVICE INFO =====\nFirmware: v1.0.0\nBuild: %s %s\nReset: %s\nSSID: "
+                 "===== DEVICE INFO =====\nFirmware: %s\nBuild: %s %s\nReset: %s\nSSID: "
                  "%s\nIP: %s\nMAC: %s\nRSSI: %d dBm\nHeap: %u KB\nFlash L.: %.1f MB\nSD Card: "
                  "%s\nData: %s\nHora: %s\nUptime: %lu ms\n=======================\n",
-                 __DATE__, __TIME__, rStr.c_str(), WiFi.SSID().c_str(),
+                 Config::FIRMWARE_VERSION, __DATE__, __TIME__, rStr.c_str(), WiFi.SSID().c_str(),
                  WiFi.localIP().toString().c_str(), WiFi.macAddress().c_str(), WiFi.RSSI(),
                  heapLivreKB, flashLivreMB, statusSD.c_str(), ntp.obterApenasData().c_str(),
                  ntp.obterApenasHora().c_str(), millis());
         _network.responderUDP(String(infoBuffer));
-    } else if (cmdLower == "net_info") {
+    }
+    else if (cmdLower == "net_info")
+    {
         snprintf(reply, sizeof(reply), "IP: %s\nSSID: %s\nRSSI: %d dBm\n",
                  WiFi.localIP().toString().c_str(), WiFi.SSID().c_str(), WiFi.RSSI());
         _network.responderUDP(String(reply));
-    } else if (cmdLower == "reason") {
-        esp_reset_reason_t r = esp_reset_reason();
-        String txt = (r == ESP_RST_POWERON)    ? "POWER_ON"
-                     : (r == ESP_RST_EXT)      ? "PIN_RESET"
-                     : (r == ESP_RST_TASK_WDT) ? "TASK_WATCHDOG"
-                                               : "SOFTWARE/OUTROS";
+    }
+    else if (cmdLower == "crash_info")
+    {
+        _network.responderUDP(CrashDiagnostics::lerArquivarEApagar(_storage));
+    }
+    else if (cmdLower == "reason")
+    {
+        String txt = CrashDiagnostics::motivoReset();
         _network.responderUDP("Ultimo Reset: [" + txt + "]\n");
-    } else if (cmdLower.startsWith("sd_del:")) {
+    }
+    else if (cmdLower.startsWith("sd_del:"))
+    {
         String caminho = cmd.substring(7);
         caminho.trim();
         if (!caminho.startsWith("/"))
             caminho = "/" + caminho;
-        _network.responderUDP(_storage.deletarArquivo(caminho.c_str()) ? "Arquivo deletado.\n"
-                                                                       : "Falha ao deletar.\n");
-    } else {
+        bool ok = _storage.deletarArquivo(caminho.c_str());
+        request.erro = !ok;
+        _network.responderUDP(ok ? "Arquivo deletado.\n" : "Falha ao deletar.\n");
+    }
+    else
+    {
+        request.erro = true;
         _network.responderUDP("Comando desconhecido\n");
     }
 }

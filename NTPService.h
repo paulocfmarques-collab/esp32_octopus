@@ -5,8 +5,9 @@
 #include <time.h>
 #include <Preferences.h>
 
-class NTPService {
-public:
+class NTPService
+{
+  public:
     bool inicializar();
     void configurarRelogio(int fuso, bool dstAtivo);
     void carregarEConfigurarHorario();

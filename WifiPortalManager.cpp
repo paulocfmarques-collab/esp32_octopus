@@ -1,6 +1,24 @@
 #include "WifiPortalManager.h"
 #include "NTPService.h"
 #include "defines.h"
+#include "CrashDiagnostics.h"
+#include "StorageManager.h"
+#include "PrometheusMetrics.h"
+#include <math.h>
+extern StorageManager storage;
+extern PrometheusMetrics prometheus;
+
+// SSIDs may contain quotes, backslashes and control characters.
+static String jsonString(const String& value) {
+    String out = "\"";
+    for (size_t i = 0; i < value.length(); ++i) {
+        unsigned char c = value[i];
+        if (c == '"' || c == '\\') { out += '\\'; out += char(c); }
+        else if (c < 32) { char escaped[7]; snprintf(escaped, sizeof(escaped), "\\u%04x", c); out += escaped; }
+        else out += char(c);
+    }
+    return out + "\"";
+}
 
 // Vincula a instância global 'ntp' declarada no arquivo principal (main.cpp)
 extern NTPService ntp;
@@ -27,7 +45,11 @@ const char* WifiPortalManager::_htmlPage PROGMEM = R"rawliteral(
     }
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', system-ui, sans-serif; }
     body { background-color: var(--bg-main); color: var(--text-main); padding: 20px; display: flex; justify-content: center; }
-    .wrapper { width: 100%; max-width: 800px; display: flex; flex-direction: column; gap: 20px; }
+    .wrapper { width: 100%; max-width: 1100px; display: flex; flex-direction: column; gap: 20px; }
+    .console { overflow-wrap: anywhere; white-space: pre-wrap; }
+    .progress-bar.danger { background: var(--danger); }
+    h2 { font-size: 16px; color: var(--accent); margin: 20px 0 12px; }
+    @media(max-width:600px) { body { padding:10px; } header { flex-wrap:wrap; gap:12px; } .tab-content { padding:12px; } .form-row { grid-template-columns:1fr; } th,td { padding:8px 4px; overflow-wrap:anywhere; } }
     header { background: var(--bg-card); padding: 20px; border-radius: 12px; border: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
     header h1 { font-size: 20px; color: var(--text-white); display: flex; align-items: center; gap: 10px; text-transform: uppercase; letter-spacing: 1px; }
     header h1 span { color: var(--accent); }
@@ -70,12 +92,12 @@ const char* WifiPortalManager::_htmlPage PROGMEM = R"rawliteral(
   <div class="wrapper">
     <header>
       <h1>🐙 Octopus <span>Node</span></h1>
-      <div class="status-badge"><div style="width:8px; height:8px; background:var(--success); border-radius:50%;"></div>ONLINE</div>
+      <div class="status-badge" id="connection" role="status">CONECTANDO...</div>
     </header>
 
     <div class="tabs">
-      <button class="tab-btn active" onclick="switchTab('dash')">📊 Dashboard</button>
-      <button class="tab-btn" onclick="switchTab('config')">⚙️ Configurações</button>
+      <button class="tab-btn active" onclick="switchTab('dash', this)">📊 Dashboard</button>
+      <button class="tab-btn" onclick="switchTab('config', this)">⚙️ Configurações</button>
     </div>
 
     <!-- ABA 1: DASHBOARD DINÂMICO -->
@@ -126,7 +148,45 @@ const char* WifiPortalManager::_htmlPage PROGMEM = R"rawliteral(
       </div>
     </div>
 
+    <div id="diagnostics" class="card">
+      <h2>Hardware e firmware</h2><div id="hardware" class="console">Aguardando dados...</div>
+      <h2>Memória e armazenamento</h2><div id="memory" class="console">Aguardando dados...</div>
+      <h2>Rede e serviços</h2><div id="services" class="console">Aguardando dados...</div>
+      <h2>Reinicialização e diagnóstico de falhas</h2><div id="reset" class="console">Aguardando dados...</div>
+      <p style="margin:12px 0">Envie <code>crash_info</code> por UDP para consultar o panic, tarefa e backtrace. O relatório é arquivado em /crash_*.txt no SD; o registro interno só é apagado após verificar a cópia. Use sd_list e sd_read:/arquivo para recuperar relatórios.</p>
+      <div class="console">Consultas UDP: help · info · status · reason · crash_info · cpu · temp · ram · heap · flash · net_info · wifi_list · sd_status · uptime · time · date · age</div>
+      <p style="margin-top:12px">Histórico UDP: /udp_log.txt (RX e TX com data, hora, cliente e resultado de envio). Rotação de 512 KB para /udp_log_old.txt. Consulte com sd_read:/udp_log.txt. Sem SD, não há gravação.</p>
+      <p id="updated" style="margin-top:12px" aria-live="polite">Atualização automática a cada 2 segundos.</p>
+    </div>
+
     <div id="config" class="tab-content">
+      <h2>Prometheus</h2>
+      <p style="margin-bottom:15px">O Prometheus coleta as métricas em uma porta exclusiva. O painel continua na porta 80.</p>
+      <form id="prom-form" action="/prometheus/salvar" method="POST">
+        <div class="checkbox-group">
+          <input type="checkbox" id="prom-enabled" name="prom_enabled" value="1">
+          <label for="prom-enabled">Ativar endpoint de métricas</label>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label for="prom-host">Endereço do servidor Prometheus autorizado (opcional)</label>
+            <input type="text" id="prom-host" name="prom_host" maxlength="253" placeholder="Ex: 192.168.1.20 ou prometheus.local">
+          </div>
+          <div class="form-group">
+            <label for="prom-port">Porta de métricas no Octopus</label>
+            <input type="number" id="prom-port" name="prom_port" min="1" max="65535" value="9120" required>
+          </div>
+        </div>
+        <p style="margin-bottom:12px">Informe apenas IP ou hostname do coletor, sem http:// nem porta. Em branco, permite a coleta por qualquer cliente da rede. A porta acima é do Octopus; não é a porta 9090 do servidor Prometheus. Portas 80 e 3232 são reservadas.</p>
+        <button id="prom-save" type="submit" class="btn-submit">Salvar Prometheus sem reiniciar</button>
+        <p id="prom-result" role="status" style="margin-top:12px"></p>
+      </form>
+      <h2>Estado da coleta</h2>
+      <div id="prom-state" class="console">Aguardando configuração...</div>
+      <h2>Exemplo para prometheus.yml</h2>
+      <pre id="prom-yaml" class="console"></pre>
+      <p style="margin:12px 0">Padrão ESP32C6: métricas de sensores, energia, relés, ADC e MQTT sem integração são omitidas. Uso de CPU aparece após amostras válidas do FreeRTOS. SD informa se as estatísticas estão disponíveis.</p>
+      <h2>Wi-Fi e relógio</h2>
       <form action="/salvar" method="POST">
         <div class="form-group">
           <label>SSID da Rede Wi-Fi</label>
@@ -160,18 +220,55 @@ const char* WifiPortalManager::_htmlPage PROGMEM = R"rawliteral(
   </div>
 
   <script>
-    function switchTab(tabId) {
+    function switchTab(tabId, button) {
       document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
       document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
       document.getElementById(tabId).classList.add('active');
-      event.currentTarget.classList.add('active');
+      button.classList.add('active');
     }
 
+    let configLoaded = false;
+    document.getElementById('prom-form').addEventListener('submit', async event => {
+      event.preventDefault();
+      const button = document.getElementById('prom-save');
+      const result = document.getElementById('prom-result');
+      const port = Number(document.getElementById('prom-port').value);
+      if (!Number.isInteger(port) || port < 1 || port > 65535 || port === 80 || port === 3232) {
+        result.textContent = 'Porta inválida: use 1 a 65535, exceto 80 e 3232.';
+        return;
+      }
+      button.disabled = true;
+      result.textContent = 'Salvando...';
+      try {
+        const response = await fetch('/prometheus/salvar', {method:'POST', body:new URLSearchParams(new FormData(event.currentTarget)), signal:AbortSignal.timeout(5000)});
+        result.textContent = await response.text();
+        if (!response.ok) result.style.color = 'var(--danger)';
+        else result.style.color = 'var(--success)';
+      } catch (err) { result.textContent = 'Não foi possível confirmar a gravação. Confira a conexão e tente novamente.'; }
+      finally { button.disabled = false; }
+    });
     async function updateMetrics() {
       try {
-        const response = await fetch('/status');
-        if (!response.ok) return;
+        const response = await fetch('/status', {cache:'no-store', signal:AbortSignal.timeout(5000)});
+        if (!response.ok) throw new Error('HTTP ' + response.status);
         const data = await response.json();
+        document.getElementById('connection').textContent = data.modo === 'AP' ? 'PORTAL AP' : data.conectado ? 'ONLINE' : 'WI-FI DESCONECTADO';
+        document.getElementById('connection').style.color = data.conectado || data.modo === 'AP' ? 'var(--success)' : 'var(--danger)';
+        document.getElementById('hardware').textContent = `Modelo: ${data.chip} · revisão ${data.revisao} · ${data.nucleos} núcleos\nCPU: ${data.cpu_mhz} MHz · temperatura: ${data.temperatura ?? 'indisponível'} °C\nFirmware: ${data.firmware} · build: ${data.build}\nESP-IDF: ${data.sdk}`;
+        document.getElementById('memory').textContent = `Heap livre / total: ${data.heap_livre} / ${data.heap_total} bytes\nMenor heap livre: ${data.heap_min} bytes · maior bloco: ${data.heap_bloco} bytes\nPSRAM livre / total: ${data.psram_livre} / ${data.psram_total} bytes\nFlash física: ${data.flash_total} bytes · frequência: ${data.flash_mhz} MHz\nFirmware: ${data.sketch} bytes · espaço disponível para sketch: ${data.sketch_livre} bytes\nCartão SD: ${data.sd ? 'inicializado' : 'indisponível'}`;
+        document.getElementById('services').textContent = `Modo: ${data.modo} · canal: ${data.canal}\nGateway: ${data.gateway} · máscara: ${data.mascara} · DNS: ${data.dns}\nHTTP: porta 80 · UDP: ${data.udp_port}\nOTA: ${data.ota ? 'inicializado (OCTOPUS_NODE)' : 'não inicializado'}\nRelógio: ${data.relogio_valido ? 'data/hora válidas' : 'aguardando sincronização'} · GMT ${data.fuso} · horário de verão: ${data.dst ? 'ativado' : 'desativado'}\nPisca padrão: ${data.blink} ms`;
+        document.getElementById('reset').textContent = `Último reset: ${data.reset}\nCore dump em flash: ${data.coredump ? 'habilitado (ELF)' : 'não habilitado neste firmware'}\nTempo ativo: ${Math.floor(data.uptime/86400)}d ${Math.floor(data.uptime/3600)%24}h ${Math.floor(data.uptime/60)%60}m ${data.uptime%60}s`;
+        document.getElementById('updated').textContent = 'Última leitura: ' + new Date().toLocaleTimeString('pt-BR');
+        document.getElementById('prom-state').textContent = `${data.prom_status}\nEndpoint: http://${data.ip}:${data.prom_port}/metrics\nServidor autorizado: ${data.prom_host || 'qualquer cliente da rede'}\nSD: ${data.sd ? 'inicializado' : 'indisponível'} · total: ${data.sd_total_bytes} B · usado: ${data.sd_used_bytes} B\nLogs gravados: ${data.sd_log_writes} · erros: ${data.sd_write_errors}`;
+        document.getElementById('prom-yaml').textContent = `scrape_configs:\n  - job_name: octopus\n    scrape_interval: 15s\n    metrics_path: /metrics\n    static_configs:\n      - targets: ['${data.ip}:${data.prom_port}']`;
+        if (!configLoaded) {
+          for (const [name, value] of Object.entries({udpport:data.udp_port, blink:data.blink, fuso:data.fuso})) document.querySelector(`[name="${name}"]`).value = value;
+          document.getElementById('dst').checked = data.dst;
+          document.getElementById('prom-enabled').checked = data.prom_enabled;
+          document.getElementById('prom-host').value = data.prom_host;
+          document.getElementById('prom-port').value = data.prom_port;
+          configLoaded = true;
+        }
         
         document.getElementById('val-data').innerText = data.data;
         document.getElementById('val-hora').innerText = data.hora;
@@ -182,7 +279,7 @@ const char* WifiPortalManager::_htmlPage PROGMEM = R"rawliteral(
         document.getElementById('val-mac').innerText = data.mac;
         document.getElementById('val-uptime').innerText = data.uptime;
 
-        const ramPct = Math.min(100, Math.max(0, (data.ram / 220) * 100));
+        const ramPct = data.heap_total ? Math.min(100, (data.heap_livre / data.heap_total) * 100) : 0;
         document.getElementById('bar-ram').style.width = ramPct + '%';
 
         let rssiPct = 100 + parseInt(data.rssi);
@@ -198,19 +295,23 @@ const char* WifiPortalManager::_htmlPage PROGMEM = R"rawliteral(
           const badgeClass = r.ocupado ? 'badge active' : 'badge empty';
           const badgeText = r.ocupado ? (r.is_head ? 'OCUPADO (HEAD)' : 'OCUPADO') : 'VAZIO';
           
-          tr.innerHTML = `
-            <td>Slot ${r.slot}</td>
-            <td style="font-family:monospace; color:${r.ocupado ? '#fff' : '#555'};">${r.ssid}</td>
-            <td><span class="${badgeClass}">${badgeText}</span></td>
-          `;
+          for (const text of ['Slot ' + r.slot, r.ssid, badgeText]) {
+            const td = document.createElement('td');
+            td.textContent = text;
+            tr.appendChild(td);
+          }
+          tr.lastChild.className = badgeClass;
           tbody.appendChild(tr);
         });
 
-      } catch (err) { console.error("Erro na leitura de métricas assíncronas", err); }
+      } catch (err) {
+        document.getElementById('connection').textContent = 'SEM COMUNICAÇÃO';
+        document.getElementById('connection').style.color = 'var(--danger)';
+        document.getElementById('updated').textContent = 'Falha na atualização. Valores exibidos são da última leitura.';
+      } finally { setTimeout(updateMetrics, 2000); }
     }
 
     updateMetrics();
-    setInterval(updateMetrics, 2000);
   </script>
 </body>
 </html>
@@ -281,7 +382,10 @@ void WifiPortalManager::iniciarPortal() {
     _server.on("/", HTTP_GET, std::bind(&WifiPortalManager::handleRoot, this));
     _server.on("/salvar", HTTP_POST, std::bind(&WifiPortalManager::handleSalvar, this));
     _server.on("/status", HTTP_GET, std::bind(&WifiPortalManager::handleStatus, this)); 
+    _server.on("/prometheus/salvar", HTTP_POST, [this]() { prometheus.salvarConfiguracao(_server); });
+    _server.onNotFound([this]() { PrometheusRequest r(prometheus); r.erro = true; _server.send(404, "text/plain", "Nao encontrado\n"); });
     _server.begin();
+    prometheus.iniciarServidor();
 }
 
 // Inicializa o servidor HTTP interno no modo Station
@@ -290,22 +394,29 @@ void WifiPortalManager::iniciarWebServerLocal() {
     _server.on("/", HTTP_GET, std::bind(&WifiPortalManager::handleRoot, this));
     _server.on("/salvar", HTTP_POST, std::bind(&WifiPortalManager::handleSalvar, this));
     _server.on("/status", HTTP_GET, std::bind(&WifiPortalManager::handleStatus, this)); 
+    _server.on("/prometheus/salvar", HTTP_POST, [this]() { prometheus.salvarConfiguracao(_server); });
+    _server.onNotFound([this]() { PrometheusRequest r(prometheus); r.erro = true; _server.send(404, "text/plain", "Nao encontrado\n"); });
     _server.begin();
+    prometheus.iniciarServidor();
 }
 
 void WifiPortalManager::iniciarUDP() {
+    if (!_udpMutex) _udpMutex = xSemaphoreCreateMutex();
     _udp.begin(getUdpPort());
 }
 
 void WifiPortalManager::processarPortal() {
     _server.handleClient();
+    prometheus.processar();
 }
 
 void WifiPortalManager::handleRoot() { 
+    PrometheusRequest request(prometheus);
     _server.send(200, "text/html", _htmlPage); 
 }
 
 void WifiPortalManager::handleStatus() {
+    PrometheusRequest request(prometheus);
     uint32_t freeHeap = ESP.getFreeHeap() / 1024;
     float flashLivre = (float)ESP.getFreeSketchSpace() / (1024.0 * 1024.0);
 
@@ -313,17 +424,70 @@ void WifiPortalManager::handleStatus() {
     int head = _prefs.getInt("head", -1);
 
     String json;
-    json.reserve(768); 
+    json.reserve(2400); 
     json = "{";
     json += "\"data\":\"" + ntp.obterApenasData() + "\",";
     json += "\"hora\":\"" + ntp.obterApenasHora() + "\",";
     json += "\"ram\":" + String(freeHeap) + ",";
     json += "\"flash\":\"" + String(flashLivre, 1) + "\",";
     json += "\"rssi\":" + String(WiFi.RSSI()) + ",";
-    json += "\"ssid\":\"" + WiFi.SSID() + "\",";
-    json += "\"ip\":\"" + WiFi.localIP().toString() + "\",";
+    json += "\"ssid\":" + jsonString(_modoAP ? String("OCTOPUS_CONFIG_PORTAL") : WiFi.SSID()) + ",";
+    json += "\"ip\":" + jsonString((_modoAP ? WiFi.softAPIP() : WiFi.localIP()).toString()) + ",";
     json += "\"mac\":\"" + WiFi.macAddress() + "\",";
     json += "\"uptime\":" + String(millis() / 1000) + ",";
+    json += "\"modo\":" + jsonString(_modoAP ? "AP" : "STA") + ",";
+    json += "\"conectado\":" + String(isConnected() ? "true" : "false") + ",";
+    json += "\"chip\":" + jsonString(ESP.getChipModel()) + ",";
+    json += "\"revisao\":" + String(ESP.getChipRevision()) + ",";
+    json += "\"nucleos\":" + String(ESP.getChipCores()) + ",";
+    json += "\"cpu_mhz\":" + String(ESP.getCpuFreqMHz()) + ",";
+    float temperatura = temperatureRead();
+    json += "\"temperatura\":" + (isfinite(temperatura) ? String(temperatura, 1) : String("null")) + ",";
+    json += "\"firmware\":" + jsonString(Config::FIRMWARE_VERSION) + ",\"build\":" + jsonString(String(__DATE__) + " " + __TIME__) + ",";
+    json += "\"sdk\":" + jsonString(ESP.getSdkVersion()) + ",";
+    json += "\"heap_livre\":" + String(ESP.getFreeHeap()) + ",";
+    json += "\"heap_total\":" + String(ESP.getHeapSize()) + ",";
+    json += "\"heap_min\":" + String(ESP.getMinFreeHeap()) + ",";
+    json += "\"heap_bloco\":" + String(ESP.getMaxAllocHeap()) + ",";
+    json += "\"psram_livre\":" + String(ESP.getFreePsram()) + ",";
+    json += "\"psram_total\":" + String(ESP.getPsramSize()) + ",";
+    json += "\"flash_total\":" + String(ESP.getFlashChipSize()) + ",";
+    json += "\"flash_mhz\":" + String(ESP.getFlashChipSpeed() / 1000000) + ",";
+    // getSketchSize verifica toda a imagem em flash; o tamanho e fixo ate o proximo boot.
+    json += "\"sketch\":" + String(prometheus.tamanhoFirmware()) + ",";
+    json += "\"sketch_livre\":" + String(ESP.getFreeSketchSpace()) + ",";
+    json += "\"sd\":" + String(storage.isAtivo() ? "true" : "false") + ",";
+    auto sd = storage.metricas();
+    json += "\"sd_total_bytes\":" + String((unsigned long long)sd.total) + ",";
+    json += "\"sd_used_bytes\":" + String((unsigned long long)sd.usado) + ",";
+    json += "\"sd_log_writes\":" + String(sd.gravacoes) + ",";
+    json += "\"sd_write_errors\":" + String(sd.erros) + ",";
+    json += "\"prom_enabled\":" + String(prometheus.ativo() ? "true" : "false") + ",";
+    json += "\"prom_port\":" + String(prometheus.porta()) + ",";
+    json += "\"prom_host\":" + jsonString(prometheus.servidor()) + ",";
+    json += "\"prom_status\":" + jsonString(prometheus.status()) + ",";
+    json += "\"canal\":" + String(WiFi.channel()) + ",";
+    json += "\"gateway\":" + jsonString(_modoAP ? String("--") : WiFi.gatewayIP().toString()) + ",";
+    json += "\"mascara\":" + jsonString((_modoAP ? WiFi.softAPSubnetMask() : WiFi.subnetMask()).toString()) + ",";
+    json += "\"dns\":" + jsonString(_modoAP ? String("--") : WiFi.dnsIP().toString()) + ",";
+    struct tm hora;
+    json += "\"relogio_valido\":" + String(getLocalTime(&hora, 0) ? "true" : "false") + ",";
+    json += "\"reset\":" + jsonString(CrashDiagnostics::motivoReset()) + ",";
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH && CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF
+    json += "\"coredump\":true,";
+#else
+    json += "\"coredump\":false,";
+#endif
+    // Use a separate Preferences instance: the circular-network namespace is open above.
+    Preferences config;
+    config.begin("wifi", true);
+    json += "\"udp_port\":" + String(config.getUInt("udpport", 4210)) + ",";
+    json += "\"blink\":" + String(config.getULong("blink", 500)) + ",";
+    json += "\"fuso\":" + String(config.getInt("fuso", -3)) + ",";
+    json += "\"dst\":" + String(config.getBool("dst", false) ? "true" : "false") + ",";
+    config.end();
+    extern TaskHandle_t TaskOtaHandle;
+    json += "\"ota\":" + String(TaskOtaHandle != NULL ? "true" : "false") + ",";
     
     json += "\"redes\":[";
     for (int i = 0; i < 5; i++) {
@@ -334,7 +498,7 @@ void WifiPortalManager::handleStatus() {
 
         json += "{";
         json += "\"slot\":" + String(i) + ",";
-        json += "\"ssid\":\"" + (ocupado ? ssidSalvo : "---") + "\",";
+        json += "\"ssid\":" + jsonString(ocupado ? ssidSalvo : "---") + ",";
         json += "\"ocupado\":" + String(ocupado ? "true" : "false") + ",";
         json += "\"is_head\":" + String(isHead ? "true" : "false");
         json += "}";
@@ -343,10 +507,12 @@ void WifiPortalManager::handleStatus() {
     _prefs.end();
     
     json += "]}";
+    _server.sendHeader("Cache-Control", "no-store");
     _server.send(200, "application/json", json);
 }
 
 void WifiPortalManager::handleSalvar() {
+    PrometheusRequest request(prometheus);
     String novoSSID = _server.arg("ssid"); 
     String novaSenha = _server.arg("senha");
     uint16_t udpPort = _server.arg("udpport").length() > 0 ? _server.arg("udpport").toInt() : 4210; 
@@ -392,13 +558,29 @@ void WifiPortalManager::adicionarRedeFila(const String& ssid, const String& senh
 }
 
 void WifiPortalManager::responderUDP(const String& resposta) {
-    _udp.beginPacket(_udp.remoteIP(), _udp.remotePort());
-    _udp.print(resposta);
-    _udp.endPacket();
+    // Mantém a porta de origem e protege o socket compartilhado entre os núcleos.
+    if (!_udpMutex) return;
+    xSemaphoreTake(_udpMutex, portMAX_DELAY);
+    bool enviado = _udp.beginPacket(_respostaIP, _respostaPorta) == 1;
+    if (enviado) {
+        enviado = _udp.print(resposta) == resposta.length();
+        enviado = _udp.endPacket() == 1 && enviado;
+    }
+    xSemaphoreGive(_udpMutex);
+    if (!enviado) prometheus.registrarErroUDP();
+    storage.gravarLogUDP("[TX][" + ntp.obterApenasData() + " " + ntp.obterApenasHora() +
+        "][uptime_ms=" + String(millis()) + "][" + _respostaIP.toString() + ":" + String(_respostaPorta) +
+        "][" + (enviado ? "ENVIADO" : "FALHA") + "][bytes=" + String(resposta.length()) + "]\n" + resposta + "\n[/TX]");
+}
+
+void WifiPortalManager::definirDestinoResposta(IPAddress ip, uint16_t porta) {
+    _respostaIP = ip;
+    _respostaPorta = porta;
 }
 
 bool WifiPortalManager::checarMensagensUDP(String& msgOut) {
-    if (_modoAP) return false;
+    if (_modoAP || !_udpMutex) return false;
+    xSemaphoreTake(_udpMutex, portMAX_DELAY);
     int packetSize = _udp.parsePacket();
     if (packetSize) {
         char buffer[256]; 
@@ -406,9 +588,16 @@ bool WifiPortalManager::checarMensagensUDP(String& msgOut) {
         if (len > 0) {
             buffer[len] = '\0';
             msgOut = String(buffer);
+            _ultimoRemetenteIP = _udp.remoteIP();
+            _ultimoRemetentePorta = _udp.remotePort();
+            xSemaphoreGive(_udpMutex);
+            storage.gravarLogUDP("[RX][" + ntp.obterApenasData() + " " + ntp.obterApenasHora() +
+                "][uptime_ms=" + String(millis()) + "][" + _ultimoRemetenteIP.toString() + ":" + String(_ultimoRemetentePorta) +
+                "][bytes=" + String(len) + "]\n" + msgOut + "\n[/RX]");
             return true;
         }
     }
+    xSemaphoreGive(_udpMutex);
     return false;
 }
 
@@ -450,5 +639,5 @@ int WifiPortalManager::getFusoHorario() { _prefs.begin("wifi", true); int f = _p
 bool WifiPortalManager::getHorarioVerao() { _prefs.begin("wifi", true); bool d = _prefs.getBool("dst", false); _prefs.end(); return d; }
 void WifiPortalManager::setNtpConfig(int fuso, bool dst) { _prefs.begin("wifi", false); _prefs.putInt("fuso", fuso); _prefs.putBool("dst", dst); _prefs.end(); }
 
-IPAddress WifiPortalManager::getUdpRemoteIP() { return _udp.remoteIP(); }
-uint16_t WifiPortalManager::getUdpRemotePort() { return _udp.remotePort(); }
+IPAddress WifiPortalManager::getUdpRemoteIP() { return _ultimoRemetenteIP; }
+uint16_t WifiPortalManager::getUdpRemotePort() { return _ultimoRemetentePorta; }

@@ -3,8 +3,9 @@
 
 #include <Arduino.h>
 
-class LedManager {
-public:
+class LedManager
+{
+  public:
     LedManager(uint8_t bluePin, uint8_t greenPin);
     void begin();
     void atualizar();
@@ -14,7 +15,7 @@ public:
     void iniciarBlinkAsync(unsigned long intervalo);
     void piscarSincrono(int piscadas, int tempoMs);
 
-private:
+  private:
     uint8_t _bluePin;
     uint8_t _greenPin;
     unsigned long _tempoVerde;

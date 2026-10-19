@@ -4,6 +4,8 @@
 #include "LedManager.h"
 #include "TelemetryEngine.h"
 #include "NTPService.h"
+#include "PrometheusMetrics.h"
+#include "ClimaService.h"
 #include <ArduinoOTA.h>
 #include <esp_task_wdt.h>
 
@@ -14,6 +16,8 @@ WifiPortalManager network(Config::PIN_LED_BLUE);
 LedManager leds(Config::PIN_LED_BLUE, Config::PIN_LED_GRN);
 NTPService ntp; 
 TelemetryEngine telemetry(storage, network, leds);
+PrometheusMetrics prometheus(storage);
+ClimaService clima(storage);
 
 // Handlers do Sistema Multitarefa FreeRTOS
 TaskHandle_t TaskRadioHandle = NULL;
@@ -22,7 +26,9 @@ TaskHandle_t TaskOtaHandle = NULL;
 QueueHandle_t filaComandosUDP = NULL;
 
 struct ComandoUDP {
-    char texto[255];
+    char texto[256];
+    uint32_t ip;
+    uint16_t porta;
 };
 
 // Protótipos das Tasks e Rotinas do Kernel
@@ -33,6 +39,7 @@ void inicializarConfiguracaoOTA();
 
 void setup() {
     Serial.begin(115200);
+    prometheus.inicializar();
     vTaskDelay(pdMS_TO_TICKS(1000));
     
     Serial.println("\n======================================================================");
@@ -41,6 +48,7 @@ void setup() {
 
     // Inicializa o gerenciador físico de LEDs
     leds.begin();
+    pinMode(Config::PIN_BTN_RST, INPUT_PULLUP);
     
     // Configura barramento SPI compartilhado para o driver do SD Card
     spiSD.begin(Config::PIN_SD_SCK, Config::PIN_SD_MISO, Config::PIN_SD_MOSI, Config::PIN_SD_CS);
@@ -103,6 +111,7 @@ void setup() {
         xTaskCreatePinnedToCore(TaskOtaCore0, "TaskOtaCore0", 4096, NULL, 1, &TaskOtaHandle, 0);
     }
 
+    clima.iniciar();
     Serial.println(F("[SYSTEM] Inicializacao multitarefa com OTA concluida com sucesso."));
     Serial.println(F("======================================================================\n"));
 }
@@ -134,11 +143,18 @@ void TaskRadioCore0(void *pvParameters) {
 
                 // Constrói e enfileira a struct para execução assíncrona no Core 1
                 ComandoUDP novoComando;
+                novoComando.ip = (uint32_t)network.getUdpRemoteIP();
+                novoComando.porta = network.getUdpRemotePort();
                 snprintf(novoComando.texto, sizeof(novoComando.texto), "%s", msgUdpRecebida.c_str());
-                xQueueSend(filaComandosUDP, &novoComando, 0);
+                if (xQueueSend(filaComandosUDP, &novoComando, 0) != pdTRUE) {
+                    prometheus.registrarErroUDP();
+                    storage.gravarLogUDP("[ERRO] Fila UDP cheia; comando RX descartado: " + msgUdpRecebida);
+                }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(2)); 
+        // Mesmo com tick maior que 2 ms, bloqueia ao menos um tick para OTA/IDLE0.
+        const TickType_t pausaRadio = pdMS_TO_TICKS(2);
+        vTaskDelay(pausaRadio ? pausaRadio : 1);
     }
 }
 
@@ -155,9 +171,11 @@ void TaskProcessorCore1(void *pvParameters) {
 
         // Processa estados assíncronos e blinks dos LEDs
         leds.atualizar();
+        storage.atualizarMetricas();
 
         // Verifica se há pacotes enviados pelo Core 0 prontos para execução
         if (xQueueReceive(filaComandosUDP, &comandoRecebido, pdMS_TO_TICKS(10)) == pdTRUE) {
+            network.definirDestinoResposta(IPAddress(comandoRecebido.ip), comandoRecebido.porta);
             telemetry.executarComando(String(comandoRecebido.texto));
         }
 

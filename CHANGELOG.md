@@ -1,58 +1,81 @@
-# ESP32 Octopus
+# Changelog — Octopus
 
-## Visão geral
+## 2026-10-19 — v1.3.0 — Clima e métricas de registros
 
-Este repositório reúne um conjunto de módulos em C++ para ESP32 com foco em conectividade, diagnóstico, logging, gestão de LEDs e OTA.
+- Adicionada consulta Open-Meteo para Porto Alegre em tarefa independente,
+  cache de 15 minutos, nova tentativa após 1 minuto em falhas e expiração
+  das leituras após 30 minutos sem sucesso.
+- Exportadas `sensor_temperature_celsius` com `source="open_meteo"` e
+  `location="porto_alegre"`, e `sensor_humidity_percent` com
+  `location="porto_alegre"`, no mesmo padrão da Central.
+- Incluídos `age` no UDP/help e `esp_weather_data_age_seconds` para a idade
+  desde a última consulta bem-sucedida, sem acesso de rede no scrape.
+- Adicionados `sdcard_log_records_total` e `sdcard_log_errors_total`, usando
+  os contadores reais de registros gravados e falhas de append já existentes.
+- Documentadas as consultas Grafana com `and on(instance, job)` e o modelo
+  `Octopus`. Compilação e validação em hardware ficam com o usuário.
 
-## Objetivo
+## 2026-10-31 — Reset dos contadores NVS
 
-O firmware atua como um controlador de rede e periféricos para dispositivos ESP32, com capacidade de:
+- Adicionado `reset_counters` ao comando UDP `help`; zera apenas boot e
+  watchdog em `metric_counts`, mantendo a configuração Prometheus.
+- Atualizados o guia de comandos e o catálogo consolidado.
 
-- provisionar Wi‑Fi em modo AP/STA;
-- receber comandos UDP;
-- manter logs em cartão SD;
-- reportar diagnósticos do sistema;
-- controlar LEDs e reset por botão;
-- sincronizar hora por NTP;
-- receber atualizações OTA.
+Consolidado em **18/10/2026** a partir dos fontes, documentação e histórico
+Git. A identificação atual do firmware é **v1.2.0**. Não foram criadas novas
+versões ou tags por esta revisão documental.
 
-## Arquitetura
+## Revisão documental — 2026-10-18
 
-A arquitetura principal é composta por módulos separados, cada um com responsabilidade bem definida:
+- Incluído `name` no catálogo UDP; retorna `Octopus` para identificar a placa.
+- Acrescentado o catálogo completo de comandos UDP ao
+  [COMANDOS.md](COMANDOS.md), distinguindo a serial de logs de um console.
+- Documentados limite/truncamento de entrada, streaming de arquivos,
+  comandos não implementados e efeitos persistentes.
+- Criado este histórico e incluído o projeto no
+  [changelog geral](../../ESP32_Documents/changelog.md).
+- Não houve mudança de firmware, compilação ou gravação nesta revisão.
 
-- `StorageManager` — acesso ao SD e persistência de logs
-- `WifiPortalManager` — gestão de rede, portal de configuração e UDP
-- `LedManager` — feedback visual por LEDs
-- `TelemetryEngine` — processador de comandos e coleta de dados
-- `NTPService` — sincronização de tempo
+## 2026-10-17 — Prometheus e disponibilidade
 
-O fluxo principal está em `Octopus.ino`, que coordena os módulos e os processos em duas tasks do FreeRTOS.
+Referências: `117f642` e `a105a50`.
 
-## Módulos e arquivos
+- Exportador Prometheus e configurações persistentes na web: ativação,
+  servidor autorizado por IP/DNS e porta própria, padrão 9120.
+- Coleta inicialmente desativada; painel na porta 80, OTA na 3232, sem
+  permitir essas portas para o servidor de métricas.
+- Métricas de identificação, Wi-Fi, CPU/tarefas, memória, Flash, GPIO,
+  HTTP/UDP e SD; fontes sem integração omitidas.
+- Padronizados MAC STA no label `device`, IP por interface, reset como
+  gauge com label e contadores persistentes de boot/watchdog.
+- Cache SD de capacidade/ocupação atualizado fora do scrape, com idade,
+  disponibilidade e contadores de escrita.
+- Respostas 403 detalham origem recebida/autorizada; falhas DNS retornam
+  indisponibilidade em vez de liberar a origem.
+- Após relato de TASK_WATCHDOG, reduzidos bloqueios por leitura de tamanho
+  de imagem e snapshots SD; núcleo de rádio descansa ao menos um tick.
+  Watchdog permanece ativo e a estabilidade precisa ser validada na placa.
 
-- `defines.h` — constantes compartilhadas de GPIO e configuração
-- `StorageManager.h` / `StorageManager.cpp` — armazenamento em microSD
-- `WifiPortalManager.h` / `WifiPortalManager.cpp` — Wi‑Fi, portal e UDP
-- `LedManager.h` / `LedManager.cpp` — LEDs e comportamento visual
-- `TelemetryEngine.h` / `TelemetryEngine.cpp` — leitura de status e execução de comandos
-- `NTPService.h` / `NTPService.cpp` — hora do sistema via NTP
-- `Octopus.ino` — entrypoint e setup do firmware
-- `card_wifi.ino` — referência antiga/monolítica
+## 2026-10-15 — crash e log UDP
 
-## Riscos e observações
+Referência: `9121dcb`.
 
-- O portal web e os comandos UDP atualmente não possuem autenticação.
-- O uso em produção deve considerar isolação da rede, firewall e validação de entrada.
-- O repositorio ainda pode evoluir com testes automatizados e documentação mais detalhada de integração.
+- `crash_info` consulta core dump ELF e salva relatório separado no SD.
+- Cópia reaberta e conferida antes de apagar o dump interno; falhas preservam
+  o original. Sem NTP, nomes usam `SEM_NTP` e uptime.
+- Histórico RX/TX em `/udp_log.txt`, com origem, tamanho, resultado,
+  data/hora e uptime; rotação em 512 KiB para `/udp_log_old.txt`.
+- Streaming limitado ao tamanho inicial do arquivo, evitando leitura sem
+  fim quando a própria resposta gera novos registros no log.
 
-## Histórico
+## Evolução anterior
 
-### 0.1.0
+- `38f2e77` (25/09): fontes e testes SD do projeto Octopus.
+- `1eefcc2` (29/09): restauração da variante legada `card_wifi`.
+- `eb0568c`, `93fc496`, `b33dd25` e `2dcbb82` (03–12/10): revisões dos
+  módulos de rede, telemetria, armazenamento, LED e aplicação.
 
-- implementação inicial de Wi‑Fi, portal, UDP, SD e OTA;
-- organização modular do firmware;
-- suporte a diagnóstico e logs.
-
-## Licença
-
-MIT. Consulte o arquivo `LICENSE`.
+As variantes `Original/test_sd_card` e `card_wifi` permanecem separadas do
+firmware modular atual. Backups não são tratados como releases aprovadas.
+Detalhes de linhas/arquivos de cada etapa estão disponíveis no Git; catálogo
+de métricas e configuração em [PROMETHEUS.md](PROMETHEUS.md).

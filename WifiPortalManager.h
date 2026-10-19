@@ -6,6 +6,8 @@
 #include <WebServer.h>
 #include <WiFiUDP.h>
 #include <Preferences.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 class WifiPortalManager {
 public:
@@ -16,6 +18,7 @@ public:
     void iniciarUDP();
     void processarPortal();
     void responderUDP(const String& resposta);
+    void definirDestinoResposta(IPAddress ip, uint16_t porta);
     bool checarMensagensUDP(String& msgOut);
     void clearConfig();
     bool isConnected();
@@ -33,6 +36,11 @@ public:
     String obterListaRedesTXT();
 
 private:
+    SemaphoreHandle_t _udpMutex = nullptr;
+    IPAddress _ultimoRemetenteIP;
+    uint16_t _ultimoRemetentePorta = 0;
+    IPAddress _respostaIP;
+    uint16_t _respostaPorta = 0;
     WebServer _server;
     WiFiUDP _udp;
     Preferences _prefs;
