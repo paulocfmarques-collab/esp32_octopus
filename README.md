@@ -1,171 +1,353 @@
-# Octopus — firmware ESP32
+# 🐙 ESP32 Octopus — Premium IoT Firmware Platform
 
-Versão **v1.4.3**. Firmware Arduino ESP32 dual-core, com comandos UDP,
-configuração web, relógio NTP, logs SD, diagnóstico de crash, OTA e métricas
-Prometheus.
+<div align="center">
 
-Duas páginas na porta 80: **Status** em `/` e **Configuração** em `/config`.
-Na configuração, **Salvar e testar login** verifica as credenciais persistidas
-e a leitura da tabela fixa `public.netscan` em segundo plano. O painel confirma
-se a senha foi alterada, mantida ou removida; informa se existe senha salva,
-sem exibi-la. Banco fixo **LogsRede**, tabela fixa **public.netscan**; nenhum
-desses nomes precisa ser preenchido. Configurações antigas preservam servidor
-e credenciais, adotando LogsRede automaticamente ao iniciar.
+![Language](https://img.shields.io/badge/language-C%2B%2B-00599C?style=for-the-badge&logo=cplusplus&logoColor=white)
+![Platform](https://img.shields.io/badge/platform-ESP32-E7352C?style=for-the-badge&logo=espressif&logoColor=white)
+![Architecture](https://img.shields.io/badge/architecture-dual--core%20FreeRTOS-1f6feb?style=for-the-badge)
+![Protocol](https://img.shields.io/badge/control-UDP%20%7C%20HTTP%20%7C%20OTA-2ea44f?style=for-the-badge)
+![License](https://img.shields.io/badge/license-MIT-black?style=for-the-badge)
 
-Interface com cartões, formulários em colunas, botões padronizados, mensagens
-de sucesso/erro destacadas e adaptação para celular, sem fontes ou recursos externos.
+Firmware **v1.4.3** para ESP32 com arquitetura modular, multitarefa nativa (FreeRTOS), controle remoto por UDP, painel web, OTA, telemetria Prometheus, varredura de rede e integração PostgreSQL.
 
-Cada evento em `/log.txt` inclui data/hora local no fuso configurado e uptime.
-Antes da sincronização do relógio, usa `[SEM_NTP]` e uptime, sem inventar uma data.
+</div>
 
-Netscan automático a cada **15 minutos** por padrão, com intervalo de 1 a 1440
-minutos ajustável na web ou por `netscan_interval:15`. Use `netscan_auto:on` ou
-`netscan_auto:off` para ativar/desativar. Configurações são persistidas nas prefs.
-PostgreSQL configurável no painel (padrão **192.168.0.20:5432**, envio inicialmente
-desativado até configurar as credenciais e habilitar o envio). Resultados usam MAC em minúsculas,
-UPSERT por MAC e `CURRENT_TIMESTAMP`. Falhas são registradas no `/log.txt` e na
-Serial. Consulte [POSTGRESQL.md](POSTGRESQL.md) para preparar o banco.
+---
 
-O painel na porta 80 tem a seção **Arquivos do cartão SD**: informe um caminho
-para baixar, ou selecione um arquivo do computador para enviar à raiz do SD.
-Exemplo de download direto: `http://IP_DO_OCTOPUS/sd/download?arquivo=/netscan.json`.
-O upload mantém o nome escolhido e substitui um destino existente após receber
-e verificar o tamanho completo. Aguarde o `netscan` terminar antes de enviar.
+## ✨ Visão geral
 
-`netscan` procura equipamentos na sub-rede Wi-Fi em segundo plano e salva
-`/netscan.json` no SD, com chaves MAC, IP e tempo de resposta ICMP. Consulte
-`netscan_status` para acompanhar e `sd_read:/netscan.json` para ler o resultado.
-Durante a varredura, o LED azul pisca a cada 250 ms e depois retoma o estado anterior.
-Requer SD e Wi-Fi; limite de 1022 hosts. Entradas apenas ARP são candidatas,
-sem confirmação de disponibilidade. Veja os detalhes em [COMANDOS.md](COMANDOS.md).
+O **Octopus** é um firmware orientado a operação contínua em dispositivos ESP32, com foco em:
 
-## Acesso
+- observabilidade (métricas + logs);
+- robustez (watchdog, isolamento por tasks, diagnóstico de crash);
+- gerência remota (UDP + web + OTA);
+- persistência local (SD) e integração externa (PostgreSQL).
 
-- **Painel web:** `http://IP_DO_OCTOPUS/`, sempre na porta **80**.
-- **UDP:** porta configurável, padrão **4210**. Envie `help` para listar comandos.
-- **Prometheus:** `http://IP_DO_OCTOPUS:PORTA/metrics`, porta TCP independente,
-  padrão **9120**, inicialmente desativado. Ative na aba Configurações.
-- **OTA:** hostname `OCTOPUS_NODE`, porta padrão ArduinoOTA **3232**.
-- **Sem Wi-Fi salvo:** conecte à rede `OCTOPUS_CONFIG_PORTAL` e abra o IP do AP.
+### 🔭 Capacidades principais
 
-## Configuração Prometheus
+- ✅ **Dual-core FreeRTOS** com tarefas dedicadas para rádio, processamento e OTA
+- ✅ **Portal Wi-Fi + fallback AP** para configuração inicial
+- ✅ **Comandos UDP** com fila assíncrona entre núcleos
+- ✅ **Painel HTTP** (`/` status e `/config` configuração)
+- ✅ **NTP + timestamps locais** com fallback `[SEM_NTP]`
+- ✅ **Netscan periódico** com persistência em `/netscan.json`
+- ✅ **Prometheus endpoint** com controle de origem e porta dedicada
+- ✅ **PostgreSQL (LogsRede/public.netscan)** com autenticação e UPSERT
+- ✅ **Logs em SD** com rotação e contadores de qualidade
+- ✅ **Crash diagnostics** com captura de core dump
+- ✅ **OTA segura com watchdog ativo**
 
-Na interface web, abra **Configurações → Prometheus**. Ative o endpoint,
-informe o IP/hostname do servidor autorizado (opcional) e a porta do endpoint
-**no Octopus**, depois clique em **Salvar Prometheus sem reiniciar**.
-Os parâmetros ficam nas Preferences/NVS e são recuperados após reiniciar.
-Não é necessário reenviar SSID ou senha para alterar Prometheus.
+---
 
-O Prometheus consulta o dispositivo pelo modelo pull. O campo de servidor
-restringe a origem da coleta; não configura envio HTTP para a porta 9090.
-Em branco, a coleta é permitida a todos os clientes que alcançarem a porta.
-Consulte [PROMETHEUS.md](PROMETHEUS.md) para configurar o servidor e conhecer
-as métricas e limitações de hardware.
+## 🧠 Arquitetura do sistema
 
-Todas as métricas incluem `device="MAC_DO_OCTOPUS"`, permitindo selecionar
-o equipamento no Grafana pelo mesmo padrão dos demais ESP32. Labels como
-`pin`, `file`, `version`, `interface` e `reason` identificam cada série.
-O schema comum segue o ESP32C6: reset como valor 1 e código no label, IP
-por interface, flash relativa à partição e contadores HTTP separados de UDP.
+```mermaid
+flowchart LR
+    A[TaskRadioCore0\nCore 0\nPrioridade 3] -->|Enfileira comandos UDP| Q[Fila FreeRTOS\nComandoUDP]
+    Q --> B[TaskProcessorCore1\nCore 1\nPrioridade 2]
+    C[TaskOtaCore0\nCore 0\nPrioridade 1] --> D[ArduinoOTA.handle]
 
-O diagnóstico UDP inclui `esp_udp_listener_up` (abertura da porta),
-`esp_udp_packets_received_total` (datagramas recebidos),
-`esp_udp_replies_sent_total` (respostas completas aceitas pela pilha local) e
-`esp_udp_send_errors_total` (tentativas de envio que falharam). Os counters
-reiniciam no boot; envio aceito não comprova entrega no cliente remoto.
+    A --> E[WiFi/UDP/Web Runtime]
+    B --> F[TelemetryEngine]
+    B --> G[LedManager]
+    B --> H[StorageManager]
+    E --> I[WifiPortalManager]
 
-## Hardware e métricas
+    J[NTPService] --> K[Timestamp local]
+    L[ClimaService] --> M[Open-Meteo Cache]
+    N[PrometheusMetrics] --> O[/metrics]
+    P[NetScan] --> R[/netscan.json]
+```
 
-O LED azul (GPIO 2) pisca durante o boot, alternando a cada 500 ms,
-por `esp_timer` em contexto de tarefa, sem PWM/LEDC, inclusive enquanto
-SD, Wi-Fi e NTP estão inicializando. O LED verde
-(GPIO 15) permanece apagado nesse período. Ao iniciar a tarefa de operação,
-o azul apaga e o verde acende, passando a alternar a cada 1 segundo como
-heartbeat. Isso também indica operação do portal de configuração, não
-necessariamente conexão à internet. Os comandos manuais do LED azul
-continuam disponíveis após o boot.
+### 🔩 Módulos centrais
 
-Temperatura e umidade de Porto Alegre são consultadas no Open-Meteo por uma
-tarefa independente, com cache para não bloquear os scrapes. Os labels seguem
-o padrão da Central: `source="open_meteo",location="porto_alegre"` para
-temperatura e `location="porto_alegre"` para umidade. O comando UDP `age` e
-`esp_weather_data_age_seconds` informam a idade do último sucesso.
-Atualiza a cada 15 minutos, tenta novamente após 1 minuto em caso de falha
-e omite temperatura/umidade se o cache ultrapassar 30 minutos.
+```mermaid
+classDiagram
+    class StorageManager
+    class WifiPortalManager
+    class LedManager
+    class TelemetryEngine
+    class NTPService
+    class PrometheusMetrics
+    class ClimaService
+    class NetScan
+    class RadioWatchdog
+    class CrashDiagnostics
+    class PgClient
 
-O firmware atual usa SD via VSPI, LEDs nos GPIOs 2 e 15 e botão de reset no
-GPIO 0. As leituras digitais exportadas correspondem somente a esses pinos.
-Não há sensores locais de energia, bateria, ambiente, relés, ADC ou cliente MQTT
-implementados. Essas séries são omitidas até existir integração real,
-seguindo o ESP32C6. A temperatura interna da CPU
-é exportada separadamente da temperatura ambiente.
+    TelemetryEngine --> StorageManager
+    TelemetryEngine --> WifiPortalManager
+    TelemetryEngine --> LedManager
+    PrometheusMetrics --> StorageManager
+    ClimaService --> StorageManager
+    NetScan --> StorageManager
+    RadioWatchdog --> CrashDiagnostics
+    PgClient --> StorageManager
+```
 
-Capacidade e ocupação do SD são armazenadas em cache e atualizadas a cada
-30 segundos, fora do processamento HTTP. As escritas de log atualizam seus
-contadores imediatamente. O firmware não implementa montagem automática
-após remoção ou inserção do cartão com o equipamento ligado.
+---
 
-## Logs e diagnóstico
+## 🗂️ Estrutura do repositório
 
-`/log.txt` contém eventos gerais. `/udp_log.txt` registra comandos RX e
-respostas TX com horário, uptime e cliente. Os logs rotacionam a 512 KiB.
-`crash_info` arquiva no SD o core dump disponível e só apaga o original após
-conferir a cópia. Detalhes e comandos em [COMANDOS.md](COMANDOS.md).
+```text
+.
+├── Octopus.ino                  # Entry point, setup e criação das tasks
+├── defines.h                    # Versão, GPIOs e constantes globais
+├── StorageManager.{h,cpp}       # SD, logs, métricas persistentes e utilitários
+├── WifiPortalManager.{h,cpp}    # Wi-Fi STA/AP, portal e web server
+├── TelemetryEngine.{h,cpp}      # Executor de comandos e lógica de resposta
+├── LedManager.{h,cpp}           # Estados de LEDs e sinalização operacional
+├── NTPService.{h,cpp}           # Sincronização de data/hora
+├── PrometheusMetrics.{h,cpp}    # Exportador /metrics
+├── ClimaService.{h,cpp}         # Integração Open-Meteo (Porto Alegre)
+├── NetScan.{h,cpp}              # Varredura IPv4 local e geração JSON
+├── NetScanSettings.cpp          # Persistência/configuração de netscan
+├── PgClient.{h,cpp}             # Cliente PostgreSQL (SCRAM/MD5)
+├── RadioWatchdog.{h,cpp}        # Checkpoints e diagnóstico de retenção
+├── CrashDiagnostics.{h,cpp}     # Core dump e relatórios de falha
+├── CooperativeYield.cpp         # Hook de yield cooperativo para tarefa de rádio
+├── WeatherHttp.h                # Interface HTTP para dados climáticos
+├── build_opt.h                  # Flags de build para limites HTTP
+├── card_wifi.ino                # Variante legada
+├── COMANDOS.md / COMANDOS.pdf   # Catálogo de comandos
+├── POSTGRESQL.md / .pdf         # Guia de integração SQL
+├── PROMETHEUS.md / .pdf         # Guia de métricas
+├── CHANGELOG.md                 # Histórico detalhado
+├── CONTRIBUTING.md              # Guia de contribuição
+├── SECURITY.md                  # Política de segurança
+└── docs/                        # Documentação adicional
+```
 
-Os painéis **Log Records** e **Log Error Records** usam os counters
-`sdcard_log_records_total` (registros gravados) e `sdcard_log_errors_total`
-(falhas ao gravar registros), incluindo logs gerais e UDP, desde o boot.
+---
 
-## Compilação
+## 🚀 Fluxo de inicialização
 
-Use Arduino IDE com o pacote **ESP32 by Espressif Systems**. O código usa APIs
-do Arduino ESP32 3.x e foi preparado para ESP32 clássico com VSPI e dois
-núcleos. A placa de referência de compilação é `esp32:esp32:esp32`.
-Mantenha uma tabela de partições compatível com OTA e, para captura de crash,
-uma partição `coredump` com core dump ELF em flash habilitado no SDK.
-Uso de CPU exige `configGENERATE_RUN_TIME_STATS` e `configUSE_TRACE_FACILITY`;
-se indisponíveis, `esp_cpu_usage_percent` é omitida.
+```mermaid
+sequenceDiagram
+    participant Boot as Boot
+    participant LED as LedManager
+    participant SD as StorageManager
+    participant WIFI as WifiPortalManager
+    participant NTP as NTPService
+    participant OTA as ArduinoOTA
+    participant RTOS as FreeRTOS Tasks
 
-Após o relatório TASK_WATCHDOG, foram reduzidos pontos de bloqueio no núcleo
-de rádio: tamanho da imagem em cache, snapshot SD sem aguardar operações FAT
-e descanso mínimo de um tick. O watchdog permanece ativo; a ausência de novos
-resets precisa ser verificada na placa. O backtrace exige o ELF da versão que
-falhou para determinar a função envolvida.
+    Boot->>LED: begin() (LED azul em boot)
+    Boot->>SD: inicializar SD (VSPI)
+    Boot->>WIFI: conectar redes salvas
+    alt Wi-Fi conectado
+        Boot->>NTP: inicializar relógio
+        Boot->>WIFI: iniciar UDP + Web
+        Boot->>OTA: configurar callbacks
+    else Falha de conexão
+        Boot->>WIFI: iniciar portal AP de emergência
+    end
+    Boot->>RTOS: criar fila + TaskRadio + TaskProcessor + TaskOTA
+```
 
-O upload ArduinoOTA é síncrono: seus callbacks de início, progresso, fim e
-erro alimentam o watchdog da própria tarefa OTA, além da alimentação no
-laço de espera. A proteção mantém o timeout de 5 segundos e os dois núcleos
-monitorados, sem desabilitar panic nem alterar globalmente o watchdog
-durante o upload. Um upload longo com progresso não deve ser confundido
-com uma tarefa travada; confirme o comportamento em hardware, inclusive
-após interrupção do envio.
+---
 
-O crash de 20/10/2026 com SHA `baea6c00f` foi decodificado no ELF correspondente:
-o rádio esperava uma linha HTTP no `WebServer`, enquanto o watchdog da OTA
-expirava. O `yield()` padrão do SDK mantém o rádio pronto e não garante execução
-da OTA de menor prioridade. `CooperativeYield.cpp` substitui o hook fraco:
-somente na tarefa de rádio, `yield()` bloqueia por um tick. As demais tarefas
-mantêm o comportamento original; watchdog, limites HTTP e callbacks OTA seguem
-ativos. Validar na placa com painel, scrapes e clientes HTTP lentos.
+## 🧵 Modelo de concorrência e watchdog
 
-Na v1.3.3, `build_opt.h` limita linhas HTTP a 750 ms e a fase de cabeçalhos
-a 1500 ms, usando as opções de compilação do Arduino ESP32 3.3.12. Mantenha
-esse arquivo junto do `.ino`; ele contém flags, não deve ser incluído com
-`#include`. Os limites também precisam ser aplicados à biblioteca WebServer;
-faça uma reconstrução completa se a IDE reutilizar seus objetos antigos.
+- **TaskRadioCore0 (prio 3 / Core 0):** rede, portal, recepção UDP e enfileiramento.
+- **TaskProcessorCore1 (prio 2 / Core 1):** execução de comandos, atualização de estados, botão físico.
+- **TaskOtaCore0 (prio 1 / Core 0):** `ArduinoOTA.handle()` em background.
 
-Durante HTTP cooperativo, somente o próprio rádio alimenta seu watchdog,
-por no máximo dois segundos por operação. Depois disso a alimentação para,
-mantendo o watchdog de cinco segundos capaz de detectar uma espera travada.
-Não há alimentação cooperativa durante DNS, espera de mutex ou escrita no SD.
-Mutex UDP e aquisição do mutex de log têm espera de até 100 ms. Se o log
-não conseguir o mutex nesse prazo, o registro não é gravado e a falha entra
-nos contadores de erro de log, em vez de prender a tarefa indefinidamente.
+```mermaid
+flowchart TD
+    A[TaskRadioCore0] --> B{Recebe UDP?}
+    B -- Sim --> C[xQueueSend ComandoUDP]
+    B -- Não --> D[vTaskDelay mínimo]
+    C --> E[TaskProcessorCore1 xQueueReceive]
+    E --> F[TelemetryEngine.executarComando]
 
-O `crash_info` inclui a última etapa do rádio preservada em RTC (HTTP painel,
-HTTP métricas, DNS, recepção UDP ou log SD). Isso auxilia o diagnóstico quando
-o resumo do core dump mostra apenas uma tarefa idle. O marcador começa a ser
-útil após gravar esta versão; ele não reconstrói a etapa de firmwares antigos.
+    G[TaskOtaCore0] --> H[ArduinoOTA.handle]
+    H --> I[Callbacks resetam watchdog]
 
-O diretório `.build/` contém somente configuração local e artefatos de
-validação; não é necessário copiá-lo para a placa.
+    J[esp_task_wdt 5s\n2 cores monitorados] --> A
+    J --> E
+    J --> G
+```
+
+---
+
+## 🌐 Interfaces de acesso
+
+| Interface | Endpoint / Porta | Observações |
+|---|---|---|
+| Painel Web (Status) | `http://IP_DO_OCTOPUS/` | Porta 80 |
+| Painel Web (Config) | `http://IP_DO_OCTOPUS/config` | Configuração geral |
+| UDP | Porta padrão `4210` | `help` lista comandos |
+| Prometheus | `http://IP_DO_OCTOPUS:9120/metrics` (padrão) | Inicialmente desativado |
+| OTA | Hostname `OCTOPUS_NODE`, porta `3232` | Upload síncrono com watchdog |
+| AP de emergência | SSID `OCTOPUS_CONFIG_PORTAL` | Quando não conecta em STA |
+
+---
+
+## 📡 Netscan + PostgreSQL pipeline
+
+```mermaid
+flowchart LR
+    A[Netscan scheduler\nintervalo default 15 min] --> B[Descoberta hosts IPv4\nPing + ARP]
+    B --> C[/netscan.json no SD]
+    C --> D{PostgreSQL habilitado?}
+    D -- Sim --> E[PgClient\nConecta em LogsRede]
+    E --> F[UPSERT em public.netscan\nMAC lowercase + timestamp]
+    D -- Não --> G[Somente persistência local]
+```
+
+### Detalhes operacionais
+
+- Banco de destino fixo: **`LogsRede`**
+- Tabela fixa: **`public.netscan`**
+- Resultado mantém JSON disponível mesmo quando SQL falha
+- Sem fila histórica de reenvio
+
+---
+
+## 📈 Observabilidade (Prometheus)
+
+O projeto exporta métricas de:
+
+- identificação e versão;
+- Wi-Fi e rede;
+- CPU/tarefas;
+- memória;
+- flash/partição;
+- GPIO;
+- HTTP/UDP;
+- SD card;
+- clima (Open-Meteo);
+- watchdog/reset.
+
+```mermaid
+mindmap
+  root((Observabilidade))
+    Prometheus
+      endpoint /metrics
+      controle de origem IP/DNS
+      porta dedicada
+    Logs SD
+      /log.txt
+      /udp_log.txt
+      rotação 512 KiB
+    Diagnóstico
+      crash_info
+      coredump ELF
+      última etapa rádio (RTC)
+```
+
+Exemplos citados no projeto:
+
+- `esp_udp_listener_up`
+- `esp_udp_packets_received_total`
+- `esp_udp_replies_sent_total`
+- `esp_udp_send_errors_total`
+- `sdcard_log_records_total`
+- `sdcard_log_errors_total`
+- `esp_weather_data_age_seconds`
+
+---
+
+## 🌦️ Clima (Open-Meteo)
+
+- Localidade fixa: **Porto Alegre**
+- Cache de **15 min**
+- Retentativa após **1 min** em falha
+- Expira leituras após **30 min** sem sucesso
+- Labels:
+  - temperatura: `source="open_meteo", location="porto_alegre"`
+  - umidade: `location="porto_alegre"`
+
+---
+
+## 💾 SD card e arquivos
+
+- Logs gerais em `/log.txt`
+- Log de tráfego UDP em `/udp_log.txt`
+- Rotação em **512 KiB**
+- Download/upload via painel web (com validações)
+- Upload rejeitado durante `netscan`
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle
+    Idle --> Download: GET /sd/download
+    Idle --> Upload: POST arquivo
+    Upload --> Validacao
+    Validacao --> Commit: tamanho íntegro
+    Validacao --> Erro: envio incompleto
+    Commit --> BackupSwap
+    BackupSwap --> Idle
+```
+
+---
+
+## ⚙️ Configuração de hardware
+
+Definida em `defines.h`:
+
+- **Firmware:** `v1.4.3`
+- **SD (VSPI):**
+  - CS: GPIO 13
+  - MOSI: GPIO 23
+  - MISO: GPIO 19
+  - SCK: GPIO 18
+  - frequência: 4 MHz
+- **LED azul:** GPIO 2
+- **LED verde:** GPIO 15
+- **Botão reset:** GPIO 0
+- **UDP padrão:** 4210
+- **Fuso padrão:** UTC-3
+
+---
+
+## 🔐 Segurança
+
+Consulte [`SECURITY.md`](SECURITY.md).
+
+Boas práticas destacadas no projeto:
+
+- reporte vulnerabilidades por canal privado;
+- não expor portal em redes públicas sem controles;
+- aplicar autenticação/validação antes de produção;
+- reduzir superfície de ataque de OTA e serviços de rede.
+
+---
+
+## 🤝 Contribuição
+
+Consulte [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+Fluxo recomendado:
+
+1. Fork
+2. Branch de alteração
+3. Código limpo e testado
+4. PR com descrição objetiva
+
+---
+
+## 🧾 Changelog
+
+Histórico completo em [`CHANGELOG.md`](CHANGELOG.md).
+
+Destaque recente:
+
+- **v1.4.3 (2026-10-22):** interface moderna, padronização visual, destino SQL fixo (`LogsRede/public.netscan`).
+
+---
+
+## 🛠️ Build e ambiente
+
+- Arduino IDE
+- Core **ESP32 by Espressif Systems** (linha 3.x)
+- Target de referência: `esp32:esp32:esp32`
+- Particionamento compatível com OTA
+- Para diagnóstico de crash: partição `coredump` com core dump ELF habilitado
+
+---
+
+## 📄 Licença
+
+Este projeto está licenciado sob a **MIT License**. Veja [`LICENSE`](LICENSE).
