@@ -4,7 +4,7 @@
 #include <Arduino.h>
 
 namespace Config {
-    constexpr const char* FIRMWARE_VERSION = "v1.3.0";
+    constexpr const char* FIRMWARE_VERSION = "v1.4.3";
     // Pinos do Cartão SD (VSPI Original)
     constexpr uint8_t PIN_SD_CS   = 13;
     constexpr uint8_t PIN_SD_MOSI = 23;

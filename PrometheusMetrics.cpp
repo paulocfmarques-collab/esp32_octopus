@@ -2,6 +2,7 @@
 #include "CrashDiagnostics.h"
 #include "defines.h"
 #include "ClimaService.h"
+#include "RadioWatchdog.h"
 extern ClimaService clima;
 #include <Preferences.h>
 #include <WiFi.h>
@@ -141,6 +142,7 @@ void PrometheusMetrics::iniciarServidor() {
 }
 
 void PrometheusMetrics::resolverServidor() {
+    RadioWatchdog::Escopo etapa(RadioWatchdog::DNS_PROMETHEUS);
     _ultimaResolucao = millis();
     _resolvido = _servidor.isEmpty();
     if (_servidor.length()) {
@@ -160,7 +162,7 @@ void PrometheusMetrics::processar() {
     if (_reconfigurar) { _reconfigurar = false; iniciarServidor(); }
     if (_ativo && _servidor.length() && millis() - _ultimaResolucao >= 60000) resolverServidor();
     atualizarCPU();
-    if (_iniciado) _server.handleClient();
+    if (_iniciado) { RadioWatchdog::Escopo etapa(RadioWatchdog::HTTP_METRICAS, true); _server.handleClient(); }
 }
 
 void PrometheusMetrics::salvarConfiguracao(WebServer& painel) {
@@ -216,6 +218,15 @@ void PrometheusMetrics::registrarComandoUDP(bool erro, uint32_t duracaoUs) {
 }
 
 void PrometheusMetrics::registrarErroUDP() { ++_errosUDP; }
+
+void PrometheusMetrics::registrarListenerUDP(bool aberto) { _udpListenerUp = aberto; }
+
+void PrometheusMetrics::registrarPacoteUDPRecebido() { ++_udpPacotesRecebidos; }
+
+void PrometheusMetrics::registrarEnvioUDP(bool enviado) {
+    if (enviado) ++_udpRespostasEnviadas;
+    else { ++_udpFalhasEnvio; registrarErroUDP(); }
+}
 
 void PrometheusMetrics::atualizarCPU() {
 #if configGENERATE_RUN_TIME_STATS && configUSE_TRACE_FACILITY
@@ -338,6 +349,10 @@ String PrometheusMetrics::gerarMetricas() {
     metric(out, "application_response_time_ms", "Duracao da ultima requisicao concluida em ms.", String(_ultimaDuracaoUs.load() / 1000.0, 3));
     metric(out, "esp_prometheus_scrapes_total", "Coletas autorizadas desde o boot.", String(_scrapes.load()), "", "counter");
     metric(out, "esp_udp_commands_total", "Comandos UDP concluidos desde o boot.", String(_comandosUDP.load()), "", "counter");
+    metric(out, "esp_udp_listener_up", "1 se a abertura da porta UDP local foi bem-sucedida; 0 se nao iniciada ou falhou.", _udpListenerUp.load() ? "1" : "0");
+    metric(out, "esp_udp_packets_received_total", "Datagramas UDP detectados pelo receptor desde o boot, antes da fila de comandos.", String(_udpPacotesRecebidos.load()), "", "counter");
+    metric(out, "esp_udp_replies_sent_total", "Respostas UDP completas aceitas pela pilha local desde o boot; nao confirma entrega.", String(_udpRespostasEnviadas.load()), "", "counter");
+    metric(out, "esp_udp_send_errors_total", "Tentativas de resposta UDP que falharam desde o boot.", String(_udpFalhasEnvio.load()), "", "counter");
     metric(out, "esp_udp_errors_total", "Erros de comando, falhas TX e descartes por fila cheia desde o boot.", String(_errosUDP.load()), "", "counter");
     metric(out, "esp_udp_response_time_ms", "Duracao do ultimo comando UDP concluido em ms.", String(_duracaoUDPUs.load() / 1000.0, 3));
 

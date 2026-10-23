@@ -6,6 +6,7 @@
 #include <WebServer.h>
 #include <WiFiUDP.h>
 #include <Preferences.h>
+#include <FS.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -47,11 +48,25 @@ private:
     bool _modoAP;
     uint8_t _ledStatus;
 
-    static const char* _htmlPage PROGMEM;
+    static const char* _htmlHead PROGMEM;
+    static const char* _htmlStatus PROGMEM;
+    static const char* _htmlConfig PROGMEM;
+    static const char* _htmlFooter PROGMEM;
 
     void handleRoot();
+    void handleConfig();
+    void enviarPagina(bool configuracao);
     void handleSalvar();
     void handleStatus();
+    void handleDownload();
+    void handleUpload();
+    void handleUploadFim();
+    File _uploadFile;
+    String _uploadDestino;
+    String _uploadErro;
+    size_t _uploadBytes = 0;
+    bool _uploadPronto = false;
+    uint32_t _uploadPartes = 0;
     
     // Método auxiliar interno para a fila circular de tamanho 5
     void adicionarRedeFila(const String& ssid, const String& senha);

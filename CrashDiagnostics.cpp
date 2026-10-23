@@ -1,4 +1,5 @@
 #include "CrashDiagnostics.h"
+#include "RadioWatchdog.h"
 #include <esp_system.h>
 #include <esp_core_dump.h>
 #include <time.h>
@@ -35,6 +36,8 @@ String CrashDiagnostics::motivoReset()
 String CrashDiagnostics::lerArquivarEApagar(StorageManager& storage)
 {
     String resultado = "Ultimo reset: " + motivoReset() + "\n";
+    if (esp_reset_reason() == ESP_RST_TASK_WDT || esp_reset_reason() == ESP_RST_INT_WDT || esp_reset_reason() == ESP_RST_WDT)
+        resultado += "Ultima etapa do radio antes do reset: " + String(RadioWatchdog::etapaAntesDoReset()) + "\n";
 #if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH && CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF
     esp_err_t erro = esp_core_dump_image_check();
     if (erro != ESP_OK)

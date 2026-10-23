@@ -7,6 +7,7 @@
 #include <SPI.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <atomic>
 
 class StorageManager {
 public:
@@ -25,6 +26,8 @@ public:
     bool deletarArquivo(const char* filename);
     bool arquivoExiste(const char* filename);
     File abrirArquivo(const char* filename, const char* mode);
+    bool salvarArquivoSeguro(const char* filename, bool (*escrever)(File&, void*), void* contexto);
+    bool substituirArquivoSeguro(const char* filename, const char* temporario);
     bool isActive() { return _sdcardOk; } // Alias para manter retrocompatibilidade
     bool isAtivo();
     MetricasSD metricas();
@@ -32,6 +35,7 @@ public:
 
 private:
     SemaphoreHandle_t _logMutex = nullptr;
+    std::atomic<uint32_t> _falhasEsperaLog{0};
     MetricasSD _metricas;
     MetricasSD _snapshot;
     portMUX_TYPE _metricasMux = portMUX_INITIALIZER_UNLOCKED;

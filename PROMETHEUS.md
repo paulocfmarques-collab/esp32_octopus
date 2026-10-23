@@ -1,4 +1,31 @@
-# Métricas Prometheus — Octopus v1.3.0
+# Métricas Prometheus — Octopus v1.4.3
+
+As páginas receberam novo layout responsivo, sem alterar nomes das métricas,
+rotas de coleta ou portas. Banco PostgreSQL fixo: LogsRede; tabela: public.netscan.
+
+Configuração em `/config`; status visual em `/`; atualização JSON em `/status`.
+O teste de login PostgreSQL roda em tarefa separada e não modifica o endpoint
+ou a autorização Prometheus. O status informa apenas a presença da senha e o
+estado do teste, sem expor a senha.
+
+Eventos escritos em `/log.txt`, incluindo falhas de PostgreSQL, têm data/hora
+local e uptime (ou SEM_NTP antes de sincronizar). Isso não altera séries ou
+contadores Prometheus: cada chamada de log continua sendo um registro.
+
+Netscan periódico e gravação PostgreSQL são configurados separadamente na web.
+Não alteram a porta ou o IP autorizado do Prometheus. Os erros SQL geram registros
+de texto no `/log.txt`; não incrementam o contador de falhas de escrita no SD
+quando o registro foi gravado normalmente. O estado SQL é consultado no painel
+ou em `netscan_status`, sem novas séries Prometheus nesta versão.
+
+Download e upload do SD ficam no painel da porta 80 (`/sd/download` e `/sd/upload`).
+Não alteram a porta de métricas nem a autorização do coletor. Usam os contadores
+HTTP de aplicação existentes; não há nova série por arquivo transferido.
+
+O comando UDP `netscan` executa descoberta em tarefa separada e salva o inventário
+por MAC em `/netscan.json`; `netscan_status` acompanha a operação. Essa listagem
+não cria séries Prometheus por equipamento. O exportador mantém a porta configurada
+e a restrição de coletor existentes durante a varredura.
 
 O formato comum segue o projeto local **ESP32C6**: identidade pelo MAC STA,
 reset como gauge 1 com código no label, interfaces de IP identificadas,
@@ -227,6 +254,10 @@ integração real, seguindo o ESP32C6.
 | `application_response_time_ms` | Gauge; duração da última requisição HTTP concluída, em ms |
 | `esp_prometheus_scrapes_total` | Counter; coletas autorizadas desde o boot |
 | `esp_udp_commands_total` | Counter; comandos UDP concluídos desde o boot |
+| `esp_udp_listener_up` | Gauge; 1 se a abertura da porta UDP retornou sucesso, 0 se não iniciada ou falhou |
+| `esp_udp_packets_received_total` | Counter; datagramas detectados pelo receptor, antes de leitura e enfileiramento |
+| `esp_udp_replies_sent_total` | Counter; respostas completas aceitas pela pilha UDP local |
+| `esp_udp_send_errors_total` | Counter; tentativas de resposta UDP que falharam |
 | `esp_udp_errors_total` | Counter; erros de comando, falhas TX e descartes por fila cheia |
 | `esp_udp_response_time_ms` | Gauge; duração do último comando UDP concluído, em ms |
 
@@ -237,6 +268,40 @@ portanto um comando pode gerar mais de um erro. As durações não medem
 latência de entrega pela rede. A amostra de um scrape ainda não
 inclui a duração e o contador de requisições concluídas desse próprio scrape.
 Não são gravados contadores de tráfego em NVS a cada requisição.
+
+`esp_udp_listener_up` reflete o resultado de `_udp.begin()` e a disponibilidade
+do mutex do socket. Não testa conectividade Wi-Fi nem entrega pela rede.
+No portal AP, em que o receptor UDP não é iniciado, fica em 0.
+`esp_udp_packets_received_total` conta cada datagrama detectado por
+`parsePacket()`, inclusive se depois houver falha de leitura, truncamento
+ou descarte por fila cheia. Datagramas vazios não reportados pela biblioteca
+como tamanho positivo não entram nesse contador.
+
+Cada chamada de resposta conta como sucesso ou falha. Sucesso exige
+`beginPacket()` válido, escrita completa e `endPacket()` aceito. Ausência
+do mutex, abertura de pacote, escrita parcial ou falha em `endPacket()`
+incrementam `esp_udp_send_errors_total` e o contador agregado
+`esp_udp_errors_total`, uma vez por tentativa. O receptor remoto não confirma
+entrega UDP. Um comando como `sd_read` pode enviar muitas respostas.
+Esses três novos counters reiniciam no boot, sem persistência em NVS.
+
+Consultas para monitorar a porta e a taxa de tráfego:
+
+```promql
+esp_udp_listener_up and on(instance, job) esp_info{model="$device"}
+```
+
+```promql
+rate(esp_udp_packets_received_total[5m])
+```
+
+```promql
+rate(esp_udp_replies_sent_total[5m])
+```
+
+```promql
+increase(esp_udp_send_errors_total[1h])
+```
 
 ## SD card
 
@@ -271,7 +336,8 @@ inclui falhas de rotação, enquanto `sdcard_append_errors_total` só conta appe
 `sdcard_log_records_total` usa o mesmo contador de `sdcard_log_writes_total`;
 `sdcard_log_errors_total` usa o contador de `sdcard_append_errors_total`.
 Incluem chamadas aos logs geral e UDP (um registro pode ter várias linhas).
-Erros significam falha para gravar um registro: SD ausente, abertura ou
+Erros significam falha para gravar um registro: SD ausente, mutex do log não
+obtido em até 100 ms, abertura ou
 escrita incompleta, não a presença da palavra ERRO no conteúdo do log.
 Falhas apenas de rotação continuam em `sdcard_write_errors_total`.
 Os counters reiniciam no boot, não na rotação ou exclusão dos arquivos;
@@ -309,6 +375,46 @@ esperar pelo mutex durante operações FAT/SD. O laço de rádio bloqueia por
 pelo menos um tick, garantindo oportunidade de execução às tarefas de menor
 prioridade mesmo com outra frequência de tick. O watchdog continua ativo.
 Essas mudanças precisam ser validadas na placa sob coleta e acesso ao painel.
+
+Em 20/10/2026, um novo relatório com SHA `baea6c00f` apontou somente
+`TaskOtaCore0` sem alimentar o watchdog. O ELF foi localizado em
+`AppData/Local/arduino/sketches` e o backtrace foi traduzido para
+`_frxt_dispatch → __yield → readLineWithLimit → WebServer::_parseRequest →
+WebServer::handleClient → WifiPortalManager::processarPortal → TaskRadioCore0`.
+O ponto observado era uma espera por dados HTTP, antes do handler da página.
+
+A v1.3.2 usa um override local do hook fraco `yield()`: quando chamado pela
+tarefa de rádio, bloqueia por um tick para liberar OTA e idle no núcleo 0.
+Isso corrige a falta de cooperação desse laço com tarefas de menor prioridade,
+sem alterar o SDK, prioridades, timeout do watchdog ou alimentar o watchdog de
+outra tarefa. Não modifica permissões, portas ou métricas. O ELF confirma o
+ponto da interrupção; ausência de novos resets requer teste de carga na placa.
+
+Na v1.3.3, após o reset `05d15c5be`, o backtrace decodificado mostrou apenas
+`IDLE1`, sem identificar o ponto onde `WdtRadioCore0` aguardava. Foram tratados
+conflitos de prazo encontrados no código, sem afirmar a origem exata desse reset:
+
+- `build_opt.h` reduz os limites WebServer de linha para 750 ms e de cabeçalhos
+  para 1500 ms. O Arduino aplica o arquivo também à compilação de Parsing.cpp;
+  uma definição somente no `.ino` não teria esse efeito.
+- `RadioWatchdog::Escopo` marca HTTP painel e métricas separadamente e faz
+  checkpoints de progresso antes/depois de cada operação, evitando acumular
+  ambas dentro de uma única janela sem alimentação.
+- O hook `yield()` alimenta o watchdog apenas da própria tarefa de rádio,
+  apenas em um escopo HTTP, e somente nos primeiros 2000 ms. A limitação
+  evita alimentação indefinida. O SDK ainda pode aguardar o LF após CR com
+  timeout interno de 5 s; não se promete que toda requisição termine em 1500 ms.
+- Aquisição dos mutex UDP e log limitada a 100 ms. Um registro de log perdido
+  por contenção incrementa `sdcard_log_errors_total`, `sdcard_append_errors_total`
+  e `sdcard_write_errors_total`; não é contabilizado como gravação bem-sucedida.
+- `crash_info` passa a incluir uma etapa preservada em RTC sem gravações NVS
+  contínuas: HTTP, DNS, leitura/mutex UDP ou log no SD. Operações SD/DNS
+  bloqueadas não recebem alimentação pelo hook HTTP.
+
+Timeout de cinco segundos, panic e watchdogs OTA/processor/idle permanecem
+ativos. Escrita física no SD e operações síncronas ainda podem exceder esse
+prazo em falhas reais; o marcador permite diferenciá-las em novo relatório.
+É necessária validação em hardware, inclusive com clientes HTTP parciais.
 
 ## Referências
 

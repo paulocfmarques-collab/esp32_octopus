@@ -1,6 +1,7 @@
 #include "StorageManager.h"
 #include "defines.h"
 #include <esp_timer.h>
+#include <time.h>
 
 StorageManager::StorageManager(uint8_t csPin, SPIClass& spiInstance) 
     : _csPin(csPin), _spiSD(spiInstance), _sdcardOk(false) {}
@@ -19,7 +20,23 @@ bool StorageManager::inicializar() {
 }
 
 void StorageManager::gravarLog(const String& mensagem) {
-    gravarRegistro("/log.txt", "/log_old.txt", mensagem);
+    // Captura o instante do evento antes de esperar pelo SD, sem aguardar NTP.
+    const time_t agora = time(nullptr);
+    struct tm horario;
+    char dataHora[32] = {};
+    if (agora >= 1577836800 && localtime_r(&agora, &horario))
+        strftime(dataHora, sizeof(dataHora), "%d/%m/%Y %H:%M:%S", &horario);
+    const auto uptime = static_cast<unsigned long long>(esp_timer_get_time() / 1000000);
+    String prefixo = dataHora[0] ? "[" + String(dataHora) + "]" : String("[SEM_NTP]");
+    char tempo[48];
+    snprintf(tempo, sizeof(tempo), " [uptime=%llus] ", uptime);
+    prefixo += tempo;
+    String texto = mensagem;
+    texto.replace("\r\n", "\n");
+    texto.replace('\r', '\n');
+    while (texto.endsWith("\n")) texto.remove(texto.length() - 1);
+    texto.replace("\n", "\n" + prefixo);
+    gravarRegistro("/log.txt", "/log_old.txt", prefixo + texto);
 }
 
 void StorageManager::gravarLogUDP(const String& mensagem) {
@@ -27,8 +44,11 @@ void StorageManager::gravarLogUDP(const String& mensagem) {
 }
 
 void StorageManager::gravarRegistro(const char* caminho, const char* anterior, const String& mensagem) {
-    if (!_logMutex) return;
-    xSemaphoreTake(_logMutex, portMAX_DELAY);
+    // A varredura FAT pode manter o mutex por segundos; nao prender o radio.
+    if (!_logMutex || xSemaphoreTake(_logMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ++_falhasEsperaLog;
+        return;
+    }
     if (!_sdcardOk) { ++_metricas.erros; ++_metricas.errosAppend; publicarMetricas(); xSemaphoreGive(_logMutex); return; }
 
     // Sistema de rotação automática de logs de 500KB
@@ -92,11 +112,59 @@ bool StorageManager::isAtivo() {
     return _sdcardOk;
 }
 
+bool StorageManager::substituirArquivoSeguro(const char* filename, const char* temporario) {
+    if (!_sdcardOk || !_logMutex || xSemaphoreTake(_logMutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+    String backup = String(filename) + ".upload.bak";
+    bool ok = SD.exists(temporario);
+    if (ok && SD.exists(backup.c_str())) {
+        if (!SD.exists(filename)) ok = SD.rename(backup.c_str(), filename);
+        else ok = SD.remove(backup.c_str());
+    }
+    bool anterior = SD.exists(filename);
+    if (ok && anterior) ok = SD.rename(filename, backup.c_str());
+    if (ok) {
+        ok = SD.rename(temporario, filename);
+        if (!ok && anterior) SD.rename(backup.c_str(), filename);
+    }
+    if (ok && anterior) SD.remove(backup.c_str());
+    xSemaphoreGive(_logMutex);
+    return ok;
+}
+
+bool StorageManager::salvarArquivoSeguro(const char* filename, bool (*escrever)(File&, void*), void* contexto) {
+    if (!_sdcardOk || !_logMutex || xSemaphoreTake(_logMutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
+    String temporario = String(filename) + ".tmp";
+    String backup = String(filename) + ".bak";
+    // Recupera uma troca interrompida antes de iniciar outra escrita.
+    bool ok = true;
+    if (SD.exists(backup.c_str())) {
+        if (!SD.exists(filename)) ok = SD.rename(backup.c_str(), filename);
+        else ok = SD.remove(backup.c_str());
+    }
+    if (ok && SD.exists(temporario.c_str())) ok = SD.remove(temporario.c_str());
+    File file = ok ? SD.open(temporario.c_str(), FILE_WRITE) : File();
+    ok = file && escrever(file, contexto);
+    if (file) { file.flush(); ok = ok && !file.getWriteError(); file.close(); }
+    bool anterior = SD.exists(filename);
+    if (ok && anterior) ok = SD.rename(filename, backup.c_str());
+    if (ok) {
+        ok = SD.rename(temporario.c_str(), filename);
+        if (!ok && anterior) SD.rename(backup.c_str(), filename);
+    }
+    if (ok && anterior) SD.remove(backup.c_str());
+    if (!ok) SD.remove(temporario.c_str());
+    xSemaphoreGive(_logMutex);
+    return ok;
+}
+
 StorageManager::MetricasSD StorageManager::metricas() {
     // O HTTP copia somente memoria; nunca espera por varredura FAT ou escrita no SD.
     portENTER_CRITICAL(&_metricasMux);
     MetricasSD copia = _snapshot;
     portEXIT_CRITICAL(&_metricasMux);
+    uint32_t falhasEspera = _falhasEsperaLog.load();
+    copia.erros += falhasEspera;
+    copia.errosAppend += falhasEspera;
     return copia;
 }
 

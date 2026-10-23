@@ -8,6 +8,8 @@
 #include "ClimaService.h"
 #include <ArduinoOTA.h>
 #include <esp_task_wdt.h>
+#include "RadioWatchdog.h"
+#include "NetScan.h"
 
 // Instanciação e Alocação dos Gerenciadores Estáticos do Sistema
 SPIClass spiSD(VSPI);
@@ -39,6 +41,8 @@ void inicializarConfiguracaoOTA();
 
 void setup() {
     Serial.begin(115200);
+    RadioWatchdog::registrarBoot();
+    leds.begin();
     prometheus.inicializar();
     vTaskDelay(pdMS_TO_TICKS(1000));
     
@@ -46,8 +50,6 @@ void setup() {
     Serial.println("[SYSTEM] INICIALIZANDO FIRMWARE MULTITAREFA PARALELO + OTA (OCTOPUS)");
     Serial.println("======================================================================");
 
-    // Inicializa o gerenciador físico de LEDs
-    leds.begin();
     pinMode(Config::PIN_BTN_RST, INPUT_PULLUP);
     
     // Configura barramento SPI compartilhado para o driver do SD Card
@@ -98,6 +100,7 @@ void setup() {
     esp_task_wdt_reconfigure(&twdt_config);
 
     // ─── CRIAÇÃO E ALOCAÇÃO DAS TASKS EM DUAL-CORE NATIVO ───
+    NetScan::inicializar(storage);
     Serial.println(F("[RTOS] Distribuindo tarefas paralelas entre os nucleos..."));
 
     // Task de Coleta e Rádio - Prioridade 3 (Alta) alocada no Core 0
@@ -124,11 +127,10 @@ void loop() {
 // ================= TAREFA DE RÁDIO (NÚCLEO 0) =================
 void TaskRadioCore0(void *pvParameters) {
     (void) pvParameters;
-    esp_task_wdt_user_handle_t wdt_handle = NULL;
-    esp_task_wdt_add_user("WdtRadioCore0", &wdt_handle);
+    RadioWatchdog::iniciar();
 
     for (;;) {
-        if (wdt_handle != NULL) esp_task_wdt_reset_user(wdt_handle);
+        RadioWatchdog::checkpoint();
 
         network.processarPortal();
 
@@ -148,6 +150,7 @@ void TaskRadioCore0(void *pvParameters) {
                 snprintf(novoComando.texto, sizeof(novoComando.texto), "%s", msgUdpRecebida.c_str());
                 if (xQueueSend(filaComandosUDP, &novoComando, 0) != pdTRUE) {
                     prometheus.registrarErroUDP();
+                    RadioWatchdog::Escopo etapa(RadioWatchdog::FILA_CHEIA_LOG);
                     storage.gravarLogUDP("[ERRO] Fila UDP cheia; comando RX descartado: " + msgUdpRecebida);
                 }
             }
@@ -161,6 +164,7 @@ void TaskRadioCore0(void *pvParameters) {
 // ================= TAREFA DE PROCESSAMENTO LÓGICO (NÚCLEO 1) =================
 void TaskProcessorCore1(void *pvParameters) {
     (void) pvParameters;
+    leds.finalizarBoot();
     esp_task_wdt_user_handle_t wdt_handle = NULL;
     esp_task_wdt_add_user("WdtProcessorCore1", &wdt_handle);
 
@@ -208,56 +212,45 @@ void TaskOtaCore0(void *pvParameters) {
     (void) pvParameters;
     Serial.println(F("[RTOS_BOOT] TaskOtaCore0 em background ativa no Core 0.\n"));
     
-    esp_task_wdt_user_handle_t wdt_handle = NULL;
-    esp_task_wdt_add_user("WdtOtaCore0", &wdt_handle);
+    ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
     for (;;) {
-        if (wdt_handle != NULL) esp_task_wdt_reset_user(wdt_handle);
+        ESP_ERROR_CHECK(esp_task_wdt_reset());
 
-        // Varre requisições de upload de binário via rede sem fios
+        // Upload sincrono: os callbacks tambem alimentam o watchdog desta tarefa.
         ArduinoOTA.handle();
         
         vTaskDelay(pdMS_TO_TICKS(50)); // Delay estendido para não impactar o tráfego do rádio
     }
 }
 
-// ================= CONFIGURAÇÃO VISUAL E PROTEÇÃO SUAVIZADA DO OTA =================
+// ================= CONFIGURACAO OTA =================
 void inicializarConfiguracaoOTA() {
     ArduinoOTA.setHostname("OCTOPUS_NODE");
 
     ArduinoOTA.onStart([]() {
-        Serial.println(F("\n[OTA] Gravacao remota iniciada! Bloqueando operacoes..."));
-        
-        // Alivia as travas do Watchdog para tolerar a latência de gravação física na Flash
-        esp_task_wdt_config_t twdt_disable_config = {
-            .timeout_ms = 30000, // Eleva para 30 segundos
-            .idle_core_mask = 0,  // Suspende monitoramento ocioso nos Cores durante o processo
-            .trigger_panic = false // Inibe o reset por estouro
-        };
-        esp_task_wdt_reconfigure(&twdt_disable_config);
-        
-        Serial.println(F("[WDT] Temporizador suavizado para o processo de Upload."));
+        ESP_ERROR_CHECK(esp_task_wdt_reset());
+        Serial.println(F("\n[OTA] Gravacao remota iniciada. Watchdog ativo."));
     });
     
     ArduinoOTA.onEnd([]() {
+        ESP_ERROR_CHECK(esp_task_wdt_reset());
         Serial.println(F("\n[OTA] SUCESSO! Firmware gravado. Reiniciando processador..."));
     });
     
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-        Serial.printf("[OTA] Progresso do Upload: %u%%\r", (progress / (total / 100)));
+        ESP_ERROR_CHECK(esp_task_wdt_reset());
+        static unsigned int ultimoPercentual = 101;
+        unsigned int percentual = total ? uint64_t(progress) * 100 / total : 0;
+        if (progress == 0 || percentual != ultimoPercentual) {
+            ultimoPercentual = percentual;
+            Serial.printf("[OTA] Progresso do Upload: %u%%\r", percentual);
+        }
     });
     
     ArduinoOTA.onError([](ota_error_t error) {
+        ESP_ERROR_CHECK(esp_task_wdt_reset());
         Serial.printf("[OTA] Erro encontrado, Codigo: [%u]\n", error);
-        
-        // Restaura imediatamente os 5 segundos originais se o upload falhar por queda de sinal
-        esp_task_wdt_config_t twdt_config = {
-            .timeout_ms = 5000,                    
-            .idle_core_mask = (1 << 0) | (1 << 1), 
-            .trigger_panic = true                  
-        };
-        esp_task_wdt_reconfigure(&twdt_config);
-        Serial.println(F("[WDT] Upload falhou. Watchdog de seguranca restaurado para 5s."));
     });
 
     ArduinoOTA.begin();

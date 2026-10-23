@@ -18,6 +18,9 @@ public:
     void registrarRequisicao(bool erro, uint32_t duracaoUs);
     void registrarComandoUDP(bool erro, uint32_t duracaoUs);
     void registrarErroUDP();
+    void registrarListenerUDP(bool aberto);
+    void registrarPacoteUDPRecebido();
+    void registrarEnvioUDP(bool enviado);
     bool resetCounters();
     bool ativo() const { return _ativo; }
     uint16_t porta() const { return _porta; }
@@ -48,6 +51,8 @@ private:
     std::atomic<uint32_t> _ultimaDuracaoUs{0};
     std::atomic<uint32_t> _scrapes{0};
     std::atomic<uint32_t> _comandosUDP{0}, _errosUDP{0}, _duracaoUDPUs{0};
+    std::atomic<bool> _udpListenerUp{false};
+    std::atomic<uint32_t> _udpPacotesRecebidos{0}, _udpRespostasEnviadas{0}, _udpFalhasEnvio{0};
     float _cpuPercent = NAN;
 #if configGENERATE_RUN_TIME_STATS && configUSE_TRACE_FACILITY
     TaskStatus_t _tarefas[64];

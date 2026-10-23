@@ -6,6 +6,7 @@
 #include "CrashDiagnostics.h"
 #include "PrometheusMetrics.h"
 #include "ClimaService.h"
+#include "NetScan.h"
 extern ClimaService clima;
 #include <WiFi.h>
 #include <esp_task_wdt.h>
@@ -69,19 +70,71 @@ void TelemetryEngine::executarComando(String cmd)
     // ─── 0. COMANDO: LISTAR TODOS OS COMANDOS (HELP) ───
     if (cmdLower == "help")
     {
-        String listaComandos = "--- Comandos Disponiveis ---\n"
-                               "info / status / version / build / reason / crash_info\n"
-                               "reboot / reset_wifi / reset_counters / wifi_list / alive / name\n"
-                               "temp / cpu / ram / heap / flash / uptime\n"
-                               "net_info / mac / rssi / ip\n"
-                               "time / date / age\n"
-                               "led_on / led_off / led_blink[:ms]\n"
-                               "--- SD ---\n"
-                               "sd_status / sd_list / sd_log / sd_clear_log\n"
-                               "sd_read:/arq / sd_size:/arq\n"
-                               "sd_write:/arq:texto / sd_del:/arq\n"
-                               "----------------------------\n";
+        String listaComandos = "COMANDOS\n"
+                               "help\n"
+                               "info\n"
+                               "status\n"
+                               "version\n"
+                               "build\n"
+                               "reason\n"
+                               "crash_info\n"
+                               "reboot\n"
+                               "reset_wifi\n"
+                               "reset_counters\n"
+                               "wifi_list\n"
+                               "alive\n"
+                               "name\n"
+                               "temp\n"
+                               "cpu\n"
+                               "ram\n"
+                               "heap\n"
+                               "flash\n"
+                               "uptime\n"
+                               "net_info\n"
+                               "netscan\n"
+                               "netscan_status\n"
+                               "netscan_interval:minutos\n"
+                               "netscan_auto:on|off\n"
+                               "mac\n"
+                               "rssi\n"
+                               "ip\n"
+                               "time\n"
+                               "date\n"
+                               "age\n"
+                               "led_on\n"
+                               "led_off\n"
+                               "led_blink[:ms]\n"
+                               "sd_status\n"
+                               "sd_list\n"
+                               "sd_log\n"
+                               "sd_clear_log\n"
+                               "sd_read:arquivo\n"
+                               "sd_size:arquivo\n"
+                               "sd_write:arquivo:texto\n"
+                               "sd_del:arquivo\n";
         _network.responderUDP(listaComandos);
+    }
+    else if (cmdLower.startsWith("netscan_interval:"))
+    {
+        String resposta = NetScan::configurarIntervalo(cmdLower.substring(17));
+        request.erro = resposta.startsWith("Erro:");
+        _network.responderUDP(resposta);
+    }
+    else if (cmdLower.startsWith("netscan_auto:"))
+    {
+        String resposta = NetScan::configurarAutomatico(cmdLower.substring(13));
+        request.erro = resposta.startsWith("Erro:");
+        _network.responderUDP(resposta);
+    }
+    else if (cmdLower == "netscan")
+    {
+        String resposta = NetScan::iniciar(_storage);
+        request.erro = resposta.startsWith("Erro:");
+        _network.responderUDP(resposta);
+    }
+    else if (cmdLower == "netscan_status")
+    {
+        _network.responderUDP(NetScan::estado());
     }
     else if (cmdLower == "age")
     {
@@ -195,10 +248,11 @@ void TelemetryEngine::executarComando(String cmd)
     else if (cmdLower == "flash")
     {
         snprintf(reply, sizeof(reply),
-                 "Flash total: %0.2f MB\nVelocidade: %u\nSketch: %0.2f MB\nLivre: %0.2f MB\n",
-                 (float)ESP.getFlashChipSize() / Config::DivMb, ESP.getFlashChipSpeed(),
+                 "Flash total: %0.2f MB\nSketch: %0.2f MB\nLivre: %0.2f MB - %0.2f %%\n",
+                 (float)ESP.getFlashChipSize() / Config::DivMb,
                  (float)ESP.getSketchSize() / Config::DivMb,
-                 (float)ESP.getFreeSketchSpace() / Config::DivMb);
+                 (float)ESP.getFreeSketchSpace() / Config::DivMb,
+                 100.0 * (float)ESP.getFreeSketchSpace() / (float)ESP.getFlashChipSize());
         _network.responderUDP(String(reply));
     }
     else if (cmdLower == "ram")

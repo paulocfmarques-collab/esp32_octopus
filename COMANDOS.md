@@ -1,4 +1,105 @@
-# Octopus — comandos e diagnóstico v1.3.0
+# Octopus — comandos e diagnóstico v1.4.3
+
+As páginas web são **Status** (`/`) e **Configuração** (`/config`), ambas na porta
+80. O endpoint `/status` continua sendo JSON para atualização e integrações.
+Na configuração, **Salvar e testar login** primeiro grava/verifica as prefs e
+então inicia teste assíncrono de autenticação, SELECT 1 e leitura das colunas de
+`public.netscan`. POST `/netscan/testar` inicia o teste sem nova gravação.
+O resultado aparece no painel e no log SD com data/hora. O teste não grava
+equipamentos nem comprova permissão de escrita; essa é validada no netscan.
+Durante o teste, mudanças de credenciais e início de netscan são recusados.
+Banco **LogsRede** e tabela **public.netscan** são fixos no firmware, sem campos
+para editar seus nomes. O servidor, porta, usuário e senha continuam configuráveis.
+A página usa formulários responsivos, cartões de seções e destaque de erros SQL.
+
+Os novos registros de `/log.txt` recebem `[DD/MM/AAAA HH:MM:SS] [uptime=Ns]`
+no fuso configurado. Antes de o relógio estar válido, recebem `[SEM_NTP]` e
+uptime. Mensagens com várias linhas recebem o mesmo instante em cada linha.
+O formato também segue para `/log_old.txt` após rotação. Registros antigos
+não são reescritos; consulte com `sd_log` ou download pelo painel.
+
+## Netscan periódico e PostgreSQL
+
+- `netscan_interval:15`: salva intervalo de 1 a 1440 minutos (padrão 15).
+- `netscan_auto:on`: ativa a agenda persistente.
+- `netscan_auto:off`: desativa a agenda, mantendo `netscan` manual disponível.
+- `netscan_status`: informa agenda, intervalo, contagem e último resultado SQL.
+
+A primeira execução automática ocorre após o intervalo contado do boot; salvar
+configuração reinicia essa contagem. Um disparo automático nunca sobrepõe uma
+varredura ativa. Falhas de pré-condição (Wi-Fi/SD) são registradas e a nova
+tentativa fica para o próximo intervalo. Não há repetição acumulada de disparos.
+
+O painel permite configurar servidor PostgreSQL (padrão 192.168.0.20), porta
+(5432), banco, usuário, senha, envio habilitado e agenda, sem reiniciar. Senha
+em branco mantém a atual; há opção explícita para apagá-la. A senha não é
+devolvida no status nem registrada em log. As prefs guardam essa configuração.
+
+Ao concluir uma varredura, o firmware salva o JSON e, se habilitado, envia os
+registros em uma transação ao `public.netscan`, usando `ON CONFLICT(mac)`.
+JSON e SQL usam MACs em minúsculas. Sem ping, `response_time` é SQL `NULL`.
+`data_leitura` usa o relógio do PostgreSQL com `CURRENT_TIMESTAMP`, conforme
+o comando solicitado. Credenciais são capturadas no início da varredura;
+alterações durante uma operação valem na próxima execução.
+
+Falhas de conexão, autenticação, timeout ou SQL aparecem na Serial, `/log.txt`
+e no estado da coleta. Falha no banco não invalida o JSON. Não há fila de
+reenvio de varreduras antigas: a próxima coleta envia seus próprios resultados.
+Sem SD gravável, o erro só pode ser observado na Serial/estado em RAM.
+Veja [POSTGRESQL.md](POSTGRESQL.md) e [sql/netscan.sql](sql/netscan.sql).
+
+## Download e upload pelo painel
+
+Na seção **Arquivos do cartão SD** do painel (porta 80), informe o caminho e
+clique em **BAIXAR ARQUIVO**, ou escolha um arquivo e clique em **ENVIAR PARA O SD**.
+Download: `GET /sd/download?arquivo=/netscan.json` (também aceita subdiretórios).
+Upload: `POST /sd/upload`, formulário `multipart/form-data`, um arquivo no campo
+`arquivo`, salvo na raiz usando o nome enviado. SD ausente, diretório ou caminho
+inválido gera erro; download de arquivo inexistente retorna 404.
+
+Os nomes aceitam letras ASCII, números, espaços, ponto, hífen e sublinhado;
+download aceita `/` para diretórios. Caminhos com `..`, nomes reservados ao upload
+ou terminados em `.tmp`/`.bak` são recusados. Upload usa `/.octopus-upload.tmp`,
+verifica o tamanho recebido e só depois troca o destino com backup
+`/nome.upload.bak`. Em falha de troca, tenta restaurar o anterior. Backup restante
+após interrupção pode ser recuperado pelo SD ou comandos UDP.
+
+Upload é recusado enquanto `netscan` estiver ativo. Downloads de logs ficam
+limitados ao tamanho inicial, mesmo se o log continuar crescendo. A transferência
+usa blocos de 1024 bytes; envio sem progresso por 1500 ms é interrompido e o
+navegador pode detectar o tamanho incompleto. Upload/download compartilham o
+servidor web do painel; uma transferência ocupa o atendimento HTTP/UDP do rádio
+até terminar, mas cede CPU para OTA e demais tarefas. O watchdog continua ativo.
+
+## Descoberta da rede (`netscan`)
+
+- `netscan`: inicia uma varredura IPv4 da sub-rede Wi-Fi em segundo plano.
+- `netscan_status`: consulta andamento, IPs verificados, MACs encontrados e resultado da gravação.
+- `sd_read:/netscan.json`: consulta o último resultado salvo no SD.
+
+Requer Wi-Fi conectado e SD ativo. Usa a máscara configurada, exclui rede e
+broadcast e aceita até 1022 hosts (/22); redes maiores são recusadas explicitamente.
+Em /24, cada IP sem resposta pode consumir aproximadamente 300 ms, além do
+processamento. Uma execução por vez; outros comandos continuam disponíveis.
+O LED azul alterna a cada 250 ms enquanto a operação estiver em andamento,
+incluindo a gravação no SD. Ao terminar ou falhar, retorna ao estado manual
+anterior (ou ao último estado solicitado por comando durante a varredura).
+
+O JSON raiz é um dicionário cuja chave é o MAC. Cada objeto contém `ip`, `mac`,
+`response_time_ms` (ping ICMP em milissegundos ou `null`), `ping_replied` e
+`discovery`: `icmp_arp`, `arp_cache` ou `self`. O próprio Octopus entra como `self`
+com tempo `null`. MACs repetidos geram uma entrada, preferindo IP com resposta ICMP.
+
+ARP só descobre MACs do segmento local. Clientes isolados, equipamentos adormecidos
+e filtros de rede podem impedir a descoberta. `arp_cache` identifica candidatos
+presentes na tabela ARP após a tentativa, inclusive quem bloqueia ping: não confirma
+que responderam nesta execução e pode conter cache antigo. Assim, a listagem não
+garante encontrar todos os equipamentos nem comprova disponibilidade sem ping.
+
+O arquivo é substituído após a varredura completa, usando `.tmp` e `.bak` para
+preservar o anterior em falhas. Mudança de IP/rede ou perda do Wi-Fi aborta a coleta.
+O último resultado fica disponível para leitura enquanto a próxima coleta acontece.
+Não há envio espontâneo ao último cliente UDP: consulte `netscan_status`.
 
 Revisão documental: **31/10/2026**.
 [Histórico local](CHANGELOG.md) e
@@ -15,6 +116,10 @@ Os nomes são normalizados para minúsculas; argumentos preservam a caixa.
 A Serial mostra logs, mas não há leitor de comandos Serial neste projeto.
 O limite interpretado é 255 bytes; datagramas maiores são **truncados** pelo
 receptor atual, portanto não envie comandos acima desse tamanho.
+
+`help` retorna o cabeçalho `COMANDOS` seguido de um comando por linha. Quando
+aplicável, a sintaxe do argumento aparece após `:`; a lista não mistura
+descrições nem instruções de transporte aos comandos.
 
 | Área | Comandos |
 | --- | --- |
@@ -76,6 +181,10 @@ Todas as amostras Prometheus incluem `device="MAC_DO_OCTOPUS"`, inclusive
 as métricas SD. Reset usa valor 1 e código no label `reason`; IP inclui
 `interface`; GPIO usa `pin`; logs SD usam caminhos completos no label `file`.
 Contadores `application_*` são HTTP; comandos UDP usam `esp_udp_*`.
+Para diagnóstico do transporte, consulte `esp_udp_listener_up`,
+`esp_udp_packets_received_total`, `esp_udp_replies_sent_total` e
+`esp_udp_send_errors_total`. Pacotes são contados antes da fila; respostas
+exigem envio completo aceito pela pilha local. Os counters reiniciam no boot.
 `sdcard_log_records_total` e `sdcard_log_errors_total` atendem aos painéis
 Log Records e Log Error Records, contando gravações e falhas de registro.
 
@@ -83,7 +192,12 @@ Log Records e Log Error Records, contando gravações e falhas de registro.
 contadores de boot/reset/watchdog persistentes. `reset_counters` zera somente
 as chaves de contadores no namespace `metric_counts`, preservando a configuração
 Prometheus. `reboot` reinicia o dispositivo.
-`version` e o painel mostram a versão v1.3.0.
+`version` e o painel mostram a versão v1.3.3.
+
+Em resets por watchdog, `crash_info` também mostra a última etapa do rádio
+preservada em RTC pela v1.3.3. O resumo de `IDLE1` sozinho não indica onde
+o rádio travou. Logs que não obtêm o mutex em até 100 ms são descartados e
+contados em `sdcard_log_errors_total`, sem prender a recepção indefinidamente.
 
 ## Diagnóstico de falhas
 
